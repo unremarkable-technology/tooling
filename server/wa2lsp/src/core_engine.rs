@@ -184,15 +184,11 @@ impl CoreEngine {
 		let diagnostics: Vec<Diagnostic> = guides
 			.into_iter()
 			.filter_map(|guide| {
-				// Get the node from the system to find its name
-				let node = system.nodes.get(guide.node)?;
-				let node_name = &node.name; // This is the logical_id from CloudFormation
-
 				// Find the resource by matching logical_id to node name
 				let resource = template
 					.resources
 					.values()
-					.find(|r| &r.logical_id == node_name)?;
+					.find(|r| r.logical_id == guide.logical_id)?;
 
 				let severity = match guide.level {
 					GuideLevel::Required => DiagnosticSeverity::ERROR,

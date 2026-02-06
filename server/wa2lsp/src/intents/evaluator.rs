@@ -1,22 +1,22 @@
+use std::fmt::Debug;
+
 use crate::spec::cfn_ir::types::{CfnTemplate, CfnValue};
 
 use super::{
-	node::{Annotation, NodeKind, TaggedValue, VendorReference},
-	system::{FocusTaxonomy, NodeError, PrettySystem, System},
+	node::Annotation,
+	system::{FocusTaxonomy, NodeError, System},
 };
-
-use std::str::FromStr;
 
 pub fn evaluate_system_ok(template: &CfnTemplate) -> Result<(), NodeError> {
 	// PROJECT: vendor template into wa2 system
 	let system = project_vendor_aws(template)?;
 
-	eprintln!("{}", PrettySystem { system: &system });
+	eprintln!("\nSystem:\n===\n{}", super::system::PrettySystem { system: &system });
 
 	// GUIDANCE: is guidance requuired?
 	let guidance = system.guidance();
 
-	eprintln!("{:?}", guidance);
+	eprintln!("Guidance:\n===\n{:?}", guidance);
 
 	// For now: treat any required guidance as failing the check.
 	if !guidance.is_empty() {
@@ -28,30 +28,49 @@ pub fn evaluate_system_ok(template: &CfnTemplate) -> Result<(), NodeError> {
 
 /// takes a Cfn template and create a system based on it
 pub fn project_vendor_aws(template: &CfnTemplate) -> Result<System, NodeError> {
-	let mut system = System::default();
+	let mut system = System::new().expect("created system graph");
+	const VENDOR: &str = "AWS";
+
+	// Create root deployment node FIRST — this is always node 1
+	let deployment = system
+		.add_node("Deployment", VENDOR, &[("name", "root")])
+		.expect("insert deployment");
 
 	for resource in template.resources.values() {
 		// MAP: resources into primitives (s3/bucket -> store)
-		let kind = match resource.resource_type.parse::<NodeKind>() {
-			Ok(k) => k,
-			Err(_) => continue, // unknown resource type -> ignore
+		let wa2_kind = match resource.resource_type.as_str() {
+			"AWS::EC2::Instance" | "AWS::Lambda::Function" => "Run",
+			"AWS::S3::Bucket" | "AWS::EC2::Volume" | "AWS::EFS::FileSystem" => "Store",
+			"AWS::SQS::Queue" | "AWS::Kinesis::Stream" => "Move",
+			_ => "",
 		};
 
 		let name = resource.logical_id.clone();
-		let node = system.add_node(&name, kind);
-
-		system.annotate(
-			node,
-			Annotation::Vendor(VendorReference {
-				name: resource.resource_type.clone(),
-			}),
-		)?;
+		//let node = system.add_node(&name, kind);
+		let node = system
+			.add_node(
+				"Resource",
+				VENDOR,
+				&[
+					("type", &resource.resource_type),
+					("logical_id", &name),
+					("wa2_kind", &wa2_kind),
+				],
+			)
+			.expect("insert resource");
+		// Attach resource to deployment
+		system.add_edge("Contains", deployment, node).ok();
 
 		// TAGS: extract any evidence held in tags
 		// TODO: map tags into taxonomy via configuration not hard coded!
-		if let Some((tag_val, _)) = resource.properties.get("Tags")
+      if let Some((tag_val, _)) = resource.properties.get("Tags")
 			&& let Some(tags) = tag_val.as_array()
 		{
+			let tags_property = system
+				.add_node("Property", VENDOR, &[("name", "tags")])
+				.expect("insert tags");
+			system.add_edge("Contains", node, tags_property).ok();
+
 			for tag in tags {
 				if let Some(tag_obj) = tag.as_object() {
 					// Safe access to Key and Value
@@ -60,27 +79,10 @@ pub fn project_vendor_aws(template: &CfnTemplate) -> Result<System, NodeError> {
 						&& let Some(key) = key_val.as_str()
 						&& let Some(value) = value_val.as_str()
 					{
-						match key {
-							"DataSensitivity" => {
-								system.annotate(
-									node,
-									Annotation::Tagged(TaggedValue {
-										tag: FocusTaxonomy::DataSensitivity,
-										value: Some(value.to_owned()),
-									}),
-								)?;
-							}
-							"DataCriticality" => {
-								system.annotate(
-									node,
-									Annotation::Tagged(TaggedValue {
-										tag: FocusTaxonomy::DataCriticality,
-										value: Some(value.to_owned()),
-									}),
-								)?;
-							}
-							_ => {}
-						}
+						let tag = system
+							.add_node("Value", VENDOR, &[("key", key), ("value", value)])
+							.expect("insert tag");
+						system.add_edge("Contains", tags_property, tag).ok();
 					}
 				}
 			}
@@ -94,6 +96,10 @@ pub fn project_vendor_aws(template: &CfnTemplate) -> Result<System, NodeError> {
 			&& let Some((rules_field, _)) = repl_obj.get("Rules")
 			&& let CfnValue::Array(rules, _) = rules_field
 		{
+         let wa2_property = system
+				.add_node("meta", "wa2", &[("name", "derived")])
+				.expect("insert tags");
+			system.add_edge("Contains", node, wa2_property).ok();
 			// can we find any rule that satisfies us
 			for rule in rules {
 				// need a rule that is at least enabled
@@ -102,7 +108,11 @@ pub fn project_vendor_aws(template: &CfnTemplate) -> Result<System, NodeError> {
 					&& let CfnValue::String(value, _) = status_value
 					&& value == "Enabled"
 				{
-					system.annotate(node, Annotation::Evidence(FocusTaxonomy::DataResiliance))?;
+					//system.annotate(node, Annotation::Evidence(FocusTaxonomy::DataResiliance))?;
+               let evidence = system
+							.add_node("Evidence", "wa2", &[("key", "evidence"), ("value", "DataResiliance")])
+							.expect("insert tag");
+						system.add_edge("Contains", wa2_property, evidence).ok();
 				}
 			}
 		}
@@ -111,18 +121,18 @@ pub fn project_vendor_aws(template: &CfnTemplate) -> Result<System, NodeError> {
 	Ok(system)
 }
 
-impl FromStr for NodeKind {
-	type Err = ();
+// impl FromStr for NodeKind {
+// 	type Err = ();
 
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		Ok(match s {
-			"AWS::EC2::Instance" | "AWS::Lambda::Function" => NodeKind::Run,
-			"AWS::S3::Bucket" | "AWS::EC2::Volume" | "AWS::EFS::FileSystem" => NodeKind::Store,
-			"AWS::SQS::Queue" | "AWS::Kinesis::Stream" => NodeKind::Move,
-			_ => return Err(()),
-		})
-	}
-}
+// 	fn from_str(s: &str) -> Result<Self, Self::Err> {
+// 		Ok(match s {
+// 			"AWS::EC2::Instance" | "AWS::Lambda::Function" => NodeKind::Run,
+// 			"AWS::S3::Bucket" | "AWS::EC2::Volume" | "AWS::EFS::FileSystem" => NodeKind::Store,
+// 			"AWS::SQS::Queue" | "AWS::Kinesis::Stream" => NodeKind::Move,
+// 			_ => return Err(()),
+// 		})
+// 	}
+// }
 
 #[cfg(test)]
 mod tests {
@@ -162,7 +172,7 @@ mod tests {
 		let parse_result = parse_and_validate(path).expect("Failed to read/parse file");
 
 		if let ParseResult::Parsed { template } = parse_result {
-			evaluate_system_ok(&template).expect_err("not tagged");
+			evaluate_system_ok(&template).expect_err("should fail");
 		} else {
 			panic!("Expected parsed template");
 		}
@@ -175,7 +185,7 @@ mod tests {
 		let parse_result = parse_and_validate(path).expect("Failed to read/parse file");
 
 		if let ParseResult::Parsed { template } = parse_result {
-			evaluate_system_ok(&template).expect_err("not tagged");
+			evaluate_system_ok(&template).expect_err("should fail: not tagged");
 		} else {
 			panic!("Expected parsed template");
 		}
@@ -188,7 +198,7 @@ mod tests {
 		let parse_result = parse_and_validate(path).expect("Failed to read/parse file");
 
 		if let ParseResult::Parsed { template } = parse_result {
-			evaluate_system_ok(&template).expect_err("not backed up");
+			evaluate_system_ok(&template).expect_err("should fail: not backed up");
 		} else {
 			panic!("Expected parsed template");
 		}

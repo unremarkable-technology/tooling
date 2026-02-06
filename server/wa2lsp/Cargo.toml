@@ -20,6 +20,7 @@ jsonc-parser = "0.28"
 zip = "6.0.0"
 datatest-stable = "0.3.3"
 id-arena = "2.2.1"
+agdb = "0.12.6"
 
 [[test]]
 name = "fixtures"

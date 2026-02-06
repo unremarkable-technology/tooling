@@ -55,6 +55,8 @@ impl CfnTemplate {
 			let type_id = ResourceTypeId(resource.resource_type.clone());
 			let type_str = &resource.resource_type;
 
+			//println!("\n{} ({})\n======\n", logical_id, type_str);
+
 			// Skip ForEach constructs - but validate they have the required transform
 			if type_str.starts_with("AWS::LanguageExtensions::ForEach") {
 				// Check if AWS::LanguageExtensions transform is present
@@ -207,6 +209,8 @@ impl CfnTemplate {
 
 				// Extract value and key range from tuple
 				let (value, key_range) = prop_value;
+
+				//println!("\n\t{}\n\t====\n\t{:?}", prop_name, value);
 
 				match resource_spec.properties.get(&prop_id) {
 					Some(prop_spec) => {

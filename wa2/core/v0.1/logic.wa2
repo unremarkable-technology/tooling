@@ -9,14 +9,14 @@ project tags {
 		AWS:*//Tags/*
 	)
 
-	let sensitivity_tags = ?(
-		cfn_tags[@Key = "DataSensitivity"]/@Value
+	let criticality_tags = ?(
+		cfn_tags[@Key = "DataCriticality"]/@Value
 	)
 
 	// how will this work if not CFN (API tag instead?)
 	map (
-		from = sensitivity_tags,
-		to = {/security/data/sensitivity = $}
+		from = criticality_tags,
+		to = {/security/data/criticality = $}
 		via = copy, // assume cfn tag value match 
 	)
 }

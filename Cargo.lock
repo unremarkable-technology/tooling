@@ -20,6 +20,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "agdb"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f482936e180f1a3d71a2461ccece56647840a0051bc21bc08e8bb29819aecfac"
+dependencies = [
+ "agdb_derive",
+]
+
+[[package]]
+name = "agdb_derive"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e1767c7a149feecfe1552e3a63e47a684cd3d7d3f5c2f21844d92accf1ab404"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2111,6 +2131,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "wa2lsp"
 version = "0.1.0"
 dependencies = [
+ "agdb",
  "blake3",
  "bytes",
  "datatest-stable",
