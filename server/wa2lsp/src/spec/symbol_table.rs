@@ -92,14 +92,12 @@ impl SymbolTable {
 		// Add pseudo-parameters (always available)
 		let pseudo_parameters = Self::create_pseudo_parameters();
 
-		let symbols = SymbolTable {
+		SymbolTable {
 			resources,
 			parameters,
 			conditions,
 			pseudo_parameters,
-		};
-      println!("Symbols\n===\n{symbols:?}");
-      symbols
+		}
 	}
 
 	/// Create the standard AWS pseudo-parameters

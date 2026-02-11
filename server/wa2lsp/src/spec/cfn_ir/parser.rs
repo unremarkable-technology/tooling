@@ -1,7 +1,7 @@
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticRelatedInformation, Location, Position, Range};
 
 use crate::spec::{
-	cfn_ir::types::{CfnAssertion, CfnMapping, CfnRule},
+	cfn_ir::types::{CfnAssertion, CfnMapping, CfnOutput, CfnRule},
 	intrinsics::IntrinsicKind,
 };
 use std::collections::HashMap;
@@ -128,6 +128,12 @@ pub fn parse_template<P: CfnParser>(
 		.transpose()?
 		.unwrap_or_default();
 
+	let outputs = parser
+		.get_section(root, "Outputs")
+		.map(|node| parse_outputs(parser, &node, uri))
+		.transpose()?
+		.unwrap_or_default();
+
 	// Parse Transform (can be string or array of strings)
 	let transform = parser.get_section(root, "Transform").and_then(|node| {
 		if let Some(s) = parser.node_as_string(&node) {
@@ -155,6 +161,7 @@ pub fn parse_template<P: CfnParser>(
 		conditions,
 		mappings,
 		rules,
+		outputs,
 		transform,
 	})
 }
@@ -503,8 +510,8 @@ fn parse_parameters<P: CfnParser>(
 	let mut parameters: HashMap<String, CfnParameter> = HashMap::new();
 	let mut errors = Vec::new();
 
-	// Get all parameters including invalid keys
-	let entries = match parser.object_entries_with_invalid_keys(node) {
+	// Use object_entries_with_ranges to get key ranges
+	let entries = match parser.object_entries_with_ranges(node) {
 		Some(entries) => entries,
 		None => {
 			return Err(vec![Diagnostic {
@@ -519,12 +526,12 @@ fn parse_parameters<P: CfnParser>(
 	};
 
 	// Parse each parameter
-	for (param_name_opt, param_node) in entries {
+	for (param_name_opt, param_node, key_range) in entries {
 		let param_name = match param_name_opt {
 			Some(name) => name,
 			None => {
 				errors.push(Diagnostic {
-					range: parser.node_range(&param_node),
+					range: key_range,
 					severity: Some(DiagnosticSeverity::WARNING),
 					code: Some(NumberOrString::String(
 						"WA2_CFN_PARAMETER_KEY_NOT_STRING".into(),
@@ -537,7 +544,7 @@ fn parse_parameters<P: CfnParser>(
 			}
 		};
 
-		let name_range = parser.node_range(&param_node);
+		let name_range = key_range;
 
 		// Validate logical ID format
 		if let Some(diag) = validate_logical_id(&param_name, "parameter", name_range, uri) {
@@ -662,8 +669,8 @@ fn parse_conditions<P: CfnParser>(
 	let mut conditions: HashMap<String, CfnCondition> = HashMap::new();
 	let mut errors = Vec::new();
 
-	// Get all conditions including invalid keys
-	let entries = match parser.object_entries_with_invalid_keys(node) {
+	// Use object_entries_with_ranges to get key ranges
+	let entries = match parser.object_entries_with_ranges(node) {
 		Some(entries) => entries,
 		None => {
 			return Err(vec![Diagnostic {
@@ -678,12 +685,12 @@ fn parse_conditions<P: CfnParser>(
 	};
 
 	// Parse each condition
-	for (condition_name_opt, condition_node) in entries {
+	for (condition_name_opt, condition_node, key_range) in entries {
 		let condition_name = match condition_name_opt {
 			Some(name) => name,
 			None => {
 				errors.push(Diagnostic {
-					range: parser.node_range(&condition_node),
+					range: key_range,
 					severity: Some(DiagnosticSeverity::WARNING),
 					code: Some(NumberOrString::String(
 						"WA2_CFN_CONDITION_KEY_NOT_STRING".into(),
@@ -696,7 +703,7 @@ fn parse_conditions<P: CfnParser>(
 			}
 		};
 
-		let name_range = parser.node_range(&condition_node);
+		let name_range = key_range;
 
 		// Validate logical ID format
 		if let Some(diag) = validate_logical_id(&condition_name, "condition", name_range, uri) {
@@ -782,7 +789,8 @@ fn parse_mappings<P: CfnParser>(
 	let mut errors = Vec::new();
 
 	// Get all mappings including invalid keys
-	let entries = match parser.object_entries_with_invalid_keys(node) {
+	// Use object_entries_with_ranges to get key ranges
+	let entries = match parser.object_entries_with_ranges(node) {
 		Some(entries) => entries,
 		None => {
 			return Err(vec![Diagnostic {
@@ -797,12 +805,12 @@ fn parse_mappings<P: CfnParser>(
 	};
 
 	// Parse each mapping
-	for (mapping_name_opt, mapping_node) in entries {
+	for (mapping_name_opt, mapping_node, key_range) in entries {
 		let mapping_name = match mapping_name_opt {
 			Some(name) => name,
 			None => {
 				errors.push(Diagnostic {
-					range: parser.node_range(&mapping_node),
+					range: key_range,
 					severity: Some(DiagnosticSeverity::WARNING),
 					code: Some(NumberOrString::String(
 						"WA2_CFN_MAPPING_KEY_NOT_STRING".into(),
@@ -815,7 +823,7 @@ fn parse_mappings<P: CfnParser>(
 			}
 		};
 
-		let name_range = parser.node_range(&mapping_node);
+		let name_range = key_range;
 
 		// Validate logical ID format
 		if let Some(diag) = validate_logical_id(&mapping_name, "mapping", name_range, uri) {
@@ -946,7 +954,7 @@ fn parse_rules<P: CfnParser>(
 	let mut errors = Vec::new();
 
 	// Get all rules including invalid keys
-	let entries = match parser.object_entries_with_invalid_keys(node) {
+	let entries = match parser.object_entries_with_ranges(node) {
 		Some(entries) => entries,
 		None => {
 			return Err(vec![Diagnostic {
@@ -961,12 +969,12 @@ fn parse_rules<P: CfnParser>(
 	};
 
 	// Parse each rule
-	for (rule_name_opt, rule_node) in entries {
+	for (rule_name_opt, rule_node, key_range) in entries {
 		let rule_name = match rule_name_opt {
 			Some(name) => name,
 			None => {
 				errors.push(Diagnostic {
-					range: parser.node_range(&rule_node),
+					range: key_range,
 					severity: Some(DiagnosticSeverity::WARNING),
 					code: Some(NumberOrString::String("WA2_CFN_RULE_KEY_NOT_STRING".into())),
 					source: Some("wa2-lsp".into()),
@@ -977,7 +985,7 @@ fn parse_rules<P: CfnParser>(
 			}
 		};
 
-		let name_range = parser.node_range(&rule_node);
+		let name_range = key_range;
 
 		// Validate logical ID format
 		if let Some(diag) = validate_logical_id(&rule_name, "rule", name_range, uri) {
@@ -1084,6 +1092,157 @@ fn parse_rule<P: CfnParser>(
 	Ok(CfnRule {
 		name: name.to_string(),
 		assertions,
+		name_range,
+	})
+}
+
+fn parse_outputs<P: CfnParser>(
+	parser: &P,
+	node: &P::Node,
+	uri: &Url,
+) -> ParseResult<HashMap<String, CfnOutput>> {
+	let mut outputs: HashMap<String, CfnOutput> = HashMap::new();
+	let mut errors = Vec::new();
+
+	let entries = match parser.object_entries_with_ranges(node) {
+		Some(entries) => entries,
+		None => {
+			return Err(vec![Diagnostic {
+				range: parser.node_range(node),
+				severity: Some(DiagnosticSeverity::ERROR),
+				code: Some(NumberOrString::String("WA2_CFN_INVALID_OUTPUTS".into())),
+				source: Some("wa2-lsp".into()),
+				message: "Template Outputs section must be an object/mapping".to_string(),
+				..Default::default()
+			}]);
+		}
+	};
+
+	for (output_name_opt, output_node, key_range) in entries {
+		let output_name = match output_name_opt {
+			Some(name) => name,
+			None => {
+				errors.push(Diagnostic {
+					range: key_range,
+					severity: Some(DiagnosticSeverity::WARNING),
+					code: Some(NumberOrString::String(
+						"WA2_CFN_OUTPUT_KEY_NOT_STRING".into(),
+					)),
+					source: Some("wa2-lsp".into()),
+					message: "Template: output key is not a string".to_string(),
+					..Default::default()
+				});
+				continue;
+			}
+		};
+
+		let name_range = key_range;
+
+		if let Some(diag) = validate_logical_id(&output_name, "output", name_range, uri) {
+			errors.push(diag);
+			continue;
+		}
+
+		match outputs.entry(output_name.clone()) {
+			std::collections::hash_map::Entry::Occupied(entry) => {
+				let first_range = entry.get().name_range;
+				errors.push(Diagnostic {
+					range: name_range,
+					severity: Some(DiagnosticSeverity::WARNING),
+					code: Some(NumberOrString::String("WA2_CFN_DUPLICATE_KEY".into())),
+					source: Some("wa2-lsp".into()),
+					message: format!(
+						"Duplicate output key `{}`. Previous definition will be overwritten.",
+						output_name
+					),
+					related_information: Some(vec![DiagnosticRelatedInformation {
+						location: Location {
+							uri: uri.clone(),
+							range: first_range,
+						},
+						message: "First definition here".to_string(),
+					}]),
+					..Default::default()
+				});
+
+				match parse_output(parser, &output_name, &output_node, name_range) {
+					Ok(output) => {
+						*entry.into_mut() = output;
+					}
+					Err(mut diags) => {
+						errors.append(&mut diags);
+					}
+				}
+			}
+			std::collections::hash_map::Entry::Vacant(entry) => {
+				match parse_output(parser, &output_name, &output_node, name_range) {
+					Ok(output) => {
+						entry.insert(output);
+					}
+					Err(mut diags) => {
+						errors.append(&mut diags);
+					}
+				}
+			}
+		}
+	}
+
+	if !errors.is_empty() {
+		return Err(errors);
+	}
+
+	Ok(outputs)
+}
+
+fn parse_output<P: CfnParser>(
+	parser: &P,
+	name: &str,
+	node: &P::Node,
+	name_range: Range,
+) -> ParseResult<CfnOutput> {
+	// Extract Value (required)
+	let value_node = parser.object_get(node, "Value").ok_or_else(|| {
+		vec![Diagnostic {
+			range: name_range,
+			severity: Some(DiagnosticSeverity::ERROR),
+			code: Some(NumberOrString::String(
+				"WA2_CFN_OUTPUT_VALUE_MISSING".into(),
+			)),
+			source: Some("wa2-lsp".into()),
+			message: format!("Template: output `{}` is missing required `Value`.", name),
+			..Default::default()
+		}]
+	})?;
+
+	let value = parse_value(parser, &value_node)?;
+
+	// Extract Description (optional)
+	let description = parser
+		.object_get(node, "Description")
+		.and_then(|n| parser.node_as_string(&n));
+
+	// Extract Export.Name (optional)
+	let export_name = if let Some(export_node) = parser.object_get(node, "Export") {
+		if let Some(name_node) = parser.object_get(&export_node, "Name") {
+			Some(parse_value(parser, &name_node)?)
+		} else {
+			None
+		}
+	} else {
+		None
+	};
+
+	// Extract Condition (optional)
+	let condition = parser
+		.object_get(node, "Condition")
+		.and_then(|n| parser.node_as_string(&n));
+
+	Ok(CfnOutput {
+		name: name.to_string(),
+		value,
+		description,
+		export_name,
+		condition,
 		name_range,
 	})
 }

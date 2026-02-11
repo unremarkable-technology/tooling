@@ -11,6 +11,7 @@ pub struct CfnTemplate {
 	pub conditions: HashMap<String, CfnCondition>,
 	pub mappings: HashMap<String, CfnMapping>,
 	pub rules: HashMap<String, CfnRule>,
+   pub outputs: HashMap<String, CfnOutput>,
 	pub transform: Option<Vec<String>>,
 }
 
@@ -76,6 +77,44 @@ pub struct CfnAssertion {
 	pub assert_description: Option<String>,
 	pub range: Range,
 }
+
+/// A CloudFormation output declaration
+#[derive(Debug, Clone)]
+pub struct CfnOutput {
+    pub name: String,
+    pub value: CfnValue,
+    pub description: Option<String>,
+    pub export_name: Option<CfnValue>,
+    pub condition: Option<String>,
+
+    // Position tracking
+    pub name_range: Range,
+}
+
+/// All CFN intrinsic type names (for iteration)
+pub const CFN_INTRINSICS: &[&str] = &[
+	"Ref",
+	"GetAtt",
+	"Sub",
+	"Join",
+	"If",
+	"Select",
+	"GetAZs",
+	"Base64",
+	"Split",
+	"Cidr",
+	"ImportValue",
+	"FindInMap",
+	"ToJsonString",
+	"Length",
+	"Contains",
+	"Transform",
+	"Equals",
+	"Not",
+	"And",
+	"Or",
+	"Condition",
+];
 
 /// A value in a CloudFormation template with position tracking
 #[derive(Debug, Clone)]
@@ -250,6 +289,34 @@ impl CfnValue {
 			CfnValue::Length { range, .. } => *range,
 			CfnValue::Contains { range, .. } => *range,
 			CfnValue::Transform { range, .. } => *range,
+		}
+	}
+
+	/// Get the CFN intrinsic function name, if this is an intrinsic
+	pub fn intrinsic_name(&self) -> Option<&'static str> {
+		match self {
+			CfnValue::Ref { .. } => Some(CFN_INTRINSICS[0]),
+			CfnValue::GetAtt { .. } => Some(CFN_INTRINSICS[1]),
+			CfnValue::Sub { .. } => Some(CFN_INTRINSICS[2]),
+			CfnValue::Join { .. } => Some(CFN_INTRINSICS[3]),
+			CfnValue::If { .. } => Some(CFN_INTRINSICS[4]),
+			CfnValue::Select { .. } => Some(CFN_INTRINSICS[5]),
+			CfnValue::GetAZs { .. } => Some(CFN_INTRINSICS[6]),
+			CfnValue::Base64 { .. } => Some(CFN_INTRINSICS[7]),
+			CfnValue::Split { .. } => Some(CFN_INTRINSICS[8]),
+			CfnValue::Cidr { .. } => Some(CFN_INTRINSICS[9]),
+			CfnValue::ImportValue { .. } => Some(CFN_INTRINSICS[10]),
+			CfnValue::FindInMap { .. } => Some(CFN_INTRINSICS[11]),
+			CfnValue::ToJsonString { .. } => Some(CFN_INTRINSICS[12]),
+			CfnValue::Length { .. } => Some(CFN_INTRINSICS[13]),
+			CfnValue::Contains { .. } => Some(CFN_INTRINSICS[14]),
+			CfnValue::Transform { .. } => Some(CFN_INTRINSICS[15]),
+			CfnValue::Equals { .. } => Some(CFN_INTRINSICS[16]),
+			CfnValue::Not { .. } => Some(CFN_INTRINSICS[17]),
+			CfnValue::And { .. } => Some(CFN_INTRINSICS[18]),
+			CfnValue::Or { .. } => Some(CFN_INTRINSICS[19]),
+			CfnValue::Condition { .. } => Some(CFN_INTRINSICS[20]),
+			_ => None,
 		}
 	}
 

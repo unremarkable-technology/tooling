@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use tower_lsp::lsp_types::Range;
+
 // ─── Identifiers ───
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct EntityId(pub u32);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -263,6 +265,9 @@ pub struct Model {
 
 	// Root entity for queries
 	root: Option<EntityId>,
+
+	// Source location tracking (sidecar)
+	source_ranges: HashMap<EntityId, Range>,
 }
 
 impl Model {
@@ -279,6 +284,7 @@ impl Model {
 			by_object: HashMap::new(),
 			by_predicate: HashMap::new(),
 			root: None,
+			source_ranges: HashMap::new(),
 		}
 	}
 
@@ -823,6 +829,42 @@ impl Model {
 	pub fn statement_count(&self) -> usize {
 		self.statements.len()
 	}
+
+	// ─── Source Location Tracking ───
+
+	/// Associate a source range with an entity
+	pub fn set_range(&mut self, entity: EntityId, range: Range) {
+		self.source_ranges.insert(entity, range);
+	}
+
+	/// Get the source range for an entity
+	pub fn get_range(&self, entity: EntityId) -> Option<Range> {
+		self.source_ranges.get(&entity).copied()
+	}
+
+	/// Find entity at a given position (for go-to-definition, hover)
+	pub fn entity_at_position(&self, position: tower_lsp::lsp_types::Position) -> Option<EntityId> {
+		for (&entity_id, &range) in &self.source_ranges {
+			if Self::position_in_range(position, range) {
+				return Some(entity_id);
+			}
+		}
+		None
+	}
+
+	// Add helper function outside impl:
+	fn position_in_range(pos: tower_lsp::lsp_types::Position, range: Range) -> bool {
+		if pos.line < range.start.line || pos.line > range.end.line {
+			return false;
+		}
+		if pos.line == range.start.line && pos.character < range.start.character {
+			return false;
+		}
+		if pos.line == range.end.line && pos.character > range.end.character {
+			return false;
+		}
+		true
+	}
 }
 
 // ─── Display ───
@@ -858,7 +900,8 @@ pub fn print_model_as_tree(model: &Model) -> String {
 	let mut out = String::new();
 
 	if let Some(root) = model.root {
-		print_node(&mut out, model, root, 0);
+      let mut visited = std::collections::HashSet::new();
+		print_node(&mut out, model, root, 0, &mut visited);
 	} else {
 		writeln!(out, "(no root set)").unwrap();
 	}
@@ -866,17 +909,33 @@ pub fn print_model_as_tree(model: &Model) -> String {
 	out
 }
 
-fn print_node(out: &mut String, model: &Model, node: EntityId, depth: usize) {
+fn print_node(
+	out: &mut String,
+	model: &Model,
+	node: EntityId,
+	depth: usize,
+	visited: &mut std::collections::HashSet<EntityId>,
+) {
 	use std::fmt::Write;
-
 	let indent = "  ".repeat(depth);
 	let name = model.qualified_name(node);
-
 	let types: Vec<String> = model
 		.types(node)
 		.iter()
 		.map(|&t| model.qualified_name(t))
 		.collect();
+
+	// If already visited, just print a reference
+	if visited.contains(&node) {
+		let type_str = if types.is_empty() {
+			String::new()
+		} else {
+			format!(" : {}", types.join(", "))
+		};
+		writeln!(out, "{}{}{} (→)", indent, name, type_str).unwrap();
+		return;
+	}
+	visited.insert(node);
 
 	let mut attrs = Vec::new();
 	let mut linked_entities = Vec::new();
@@ -884,11 +943,9 @@ fn print_node(out: &mut String, model: &Model, node: EntityId, depth: usize) {
 	for stmt_id in model.outgoing(node) {
 		let stmt = model.statement(stmt_id);
 		let pred_name = model.qualified_name(stmt.predicate);
-
 		if pred_name == "wa2:type" || pred_name == "wa2:contains" {
 			continue;
 		}
-
 		match &stmt.object {
 			Value::Literal(lit) => {
 				attrs.push(format!("{}=\"{}\"", pred_name, lit));
@@ -907,6 +964,7 @@ fn print_node(out: &mut String, model: &Model, node: EntityId, depth: usize) {
 	} else {
 		format!(" : {}", types.join(", "))
 	};
+
 	let attr_str = if attrs.is_empty() {
 		String::new()
 	} else {
@@ -917,13 +975,16 @@ fn print_node(out: &mut String, model: &Model, node: EntityId, depth: usize) {
 
 	// First print wa2:contains children
 	for child in model.children(node) {
-		print_node(out, model, child, depth + 1);
+		print_node(out, model, child, depth + 1, visited);
 	}
+
+	// Sort by entity ID to show in creation order
+	linked_entities.sort_by_key(|(_, child_id)| *child_id);
 
 	// Then print entities linked via other predicates
 	for (pred_name, child_id) in linked_entities {
-		writeln!(out, "{} -{}-", indent, pred_name).unwrap();
-		print_node(out, model, child_id, depth + 2);
+		writeln!(out, "{}  -{}-", indent, pred_name).unwrap();
+		print_node(out, model, child_id, depth + 2, visited);
 	}
 }
 // ─── Tests ───

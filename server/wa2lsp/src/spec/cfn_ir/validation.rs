@@ -143,7 +143,7 @@ impl CfnTemplate {
 				None => continue,
 			};
 
-			println!("\n{} ({})\n======\n{:?}", logical_id, type_str, resource_spec);
+			//println!("\n{} ({})\n======\n{:?}", logical_id, type_str, resource_spec);
 
 			// Check for required properties
 			for (prop_name, prop_spec) in &resource_spec.properties {
@@ -558,7 +558,7 @@ impl CfnTemplate {
 	}
 
 	/// Extract ${Variable} references from a Sub template string
-	fn extract_sub_variables(template: &str) -> Vec<String> {
+	pub fn extract_sub_variables(template: &str) -> Vec<String> {
 		let mut variables = Vec::new();
 		let mut chars = template.chars().peekable();
 

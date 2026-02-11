@@ -1,16 +1,16 @@
 use std::{collections::HashMap, sync::Arc};
 
-use saphyr::LoadableYamlNode;
 use tower_lsp::lsp_types::{
 	Diagnostic, DiagnosticSeverity, Location, NumberOrString, Position, Range, Url,
 };
 
 use crate::{
-	intents::evaluator::{GuideLevel, guidance, project_vendor_aws}, spec::{
-		cfn_ir::{parser::CfnParser, types::CfnTemplate},
-		spec_store::SpecStore,
-		symbol_table::SymbolTable,
-	}
+	intents::{
+		guidance::{GuideLevel, guidance},
+		model::Model,
+		vendor::{Method, Vendor, get_projector},
+	},
+	spec::{cfn_ir::types::CfnTemplate, spec_store::SpecStore},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +42,7 @@ struct DocumentState {
 	text: String,
 	format: DocumentFormat,
 	cached_diagnostics: Vec<Diagnostic>,
+	cached_model: Option<Model>,
 }
 
 /// core engine: owns all document state and analysis logic
@@ -80,6 +81,7 @@ impl CoreEngine {
 				text,
 				format,
 				cached_diagnostics: vec![],
+				cached_model: None,
 			},
 		);
 	}
@@ -98,6 +100,7 @@ impl CoreEngine {
 				text: new_text,
 				format,
 				cached_diagnostics: vec![],
+				cached_model: None,
 			},
 		);
 	}
@@ -171,30 +174,32 @@ impl CoreEngine {
 	}
 
 	/// Convert WA2 guidance into LSP diagnostics
-	pub fn analyse_document_slow(&mut self, template: &CfnTemplate, uri: &Url) -> Vec<Diagnostic> {
-		let model = match project_vendor_aws(template) {
-			Ok(model) => model,
-			Err(_) => return vec![], // If evaluation fails, return no diagnostics
+	pub fn analyse_document_slow(&mut self, uri: &Url) -> Vec<Diagnostic> {
+		let doc = match self.docs.get(uri) {
+			Some(d) => d,
+			None => return vec![],
+		};
+
+		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
+
+		let model = match projector.project(&doc.text, uri) {
+			Ok(result) => result.model,
+			Err(diags) => return diags,
 		};
 
 		let guides = guidance(&model);
 
-		// Convert each guide to a diagnostic
 		let diagnostics: Vec<Diagnostic> = guides
 			.into_iter()
 			.filter_map(|guide| {
-				// Find the resource by matching logical_id to node name
-				let resource = template
-					.resources
-					.values()
-					.find(|r| r.logical_id == guide.logical_id)?;
+				// We need the template to get ranges - but we can get them from the model now
+				let range = model.get_range(guide.entity)?;
 
 				let severity = match guide.level {
 					GuideLevel::Required => DiagnosticSeverity::ERROR,
 					GuideLevel::Action => DiagnosticSeverity::WARNING,
 				};
 
-				// Store guide data in diagnostic.data for hover provider
 				let data = serde_json::json!({
 					"kind": "wa2_guide",
 					"tldr": guide.tldr,
@@ -203,20 +208,21 @@ impl CoreEngine {
 				});
 
 				Some(Diagnostic {
-					range: resource.logical_id_range,
+					range,
 					severity: Some(severity),
 					code: Some(NumberOrString::String("WA2_GUIDE".into())),
 					source: Some("wa2".into()),
-					message: guide.tldr, // Short message in Problems panel
-					data: Some(data),    // Full data for hover
+					message: guide.tldr,
+					data: Some(data),
 					..Default::default()
 				})
 			})
 			.collect();
 
-		// Cache the WA2 diagnostics
+		// Cache both diagnostics and model
 		if let Some(doc_state) = self.docs.get_mut(uri) {
 			doc_state.cached_diagnostics = diagnostics.clone();
+			doc_state.cached_model = Some(model);
 		}
 
 		diagnostics
@@ -225,64 +231,47 @@ impl CoreEngine {
 	pub fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {
 		let doc = self.docs.get(uri)?;
 
-		// Parse template and get root node
-		let (word, template) = match doc.format {
-			DocumentFormat::Json => {
-				let parse_result =
-					jsonc_parser::parse_to_ast(&doc.text, &Default::default(), &Default::default())
-						.ok()?;
-				let root = parse_result.value?;
-				let parser = crate::spec::cfn_ir::json::JsonCfnParser::new(&doc.text);
-				let word = parser.word_at_position(&root, position)?;
-				let template = CfnTemplate::from_json(&doc.text, uri).ok()?;
-				(word, template)
-			}
-			DocumentFormat::Yaml => {
-				let docs = saphyr::MarkedYaml::load_from_str(&doc.text).ok()?;
-
-				if docs.is_empty() {
-					return None;
-				}
-
-				let parser = crate::spec::cfn_ir::yaml::YamlCfnParser::new(&doc.text);
-				let word = parser.word_at_position(&docs[0], position);
-
-				let word = word?;
-
-				let template = CfnTemplate::from_yaml(&doc.text, uri).ok()?;
-				(word, template)
+		// Get cached model or project on demand
+		let model = match &doc.cached_model {
+			Some(m) => m.clone(),
+			None => {
+				let projector = get_projector(Vendor::Aws, Method::CloudFormation);
+				projector.project(&doc.text, uri).ok()?.model
 			}
 		};
 
-		// Build symbol table
-		let symbols = SymbolTable::from_template(&template);
+		// Find entity at cursor position
+		let entity = model.entity_at_position(position)?;
 
-		// Look up the word (handle GetAtt dot notation)
-		let lookup_word = word.split('.').next().unwrap_or(&word);
-		if let Some(resource) = symbols.resources.get(lookup_word) {
+		// Resolve cfn types
+		let cfn_ref = model.resolve("cfn:Ref")?;
+		let cfn_getatt = model.resolve("cfn:GetAtt")?;
+		let cfn_sub = model.resolve("cfn:Sub")?;
+		let cfn_sub_var_ref = model.resolve("cfn:SubVarRef"); // May not exist in older models
+		let cfn_target = model.resolve("cfn:target")?;
+
+		// If entity is a Ref, GetAtt, Sub, or SubVarRef, follow cfn:target to definition
+		let is_navigable = model.has_type(entity, cfn_ref)
+			|| model.has_type(entity, cfn_getatt)
+			|| model.has_type(entity, cfn_sub)
+			|| cfn_sub_var_ref.map_or(false, |t| model.has_type(entity, t));
+
+		if is_navigable {
+			let targets = model.get_all(entity, cfn_target);
+			let target = targets.first()?.as_entity()?;
+			let range = model.get_range(target)?;
 			return Some(Location {
 				uri: uri.clone(),
-				range: resource.location,
+				range,
 			});
 		}
 
-		// Look up the word as a parameter
-		if let Some(parameter) = symbols.parameters.get(&word) {
-			return Some(Location {
-				uri: uri.clone(),
-				range: parameter.location,
-			});
-		}
-
-		// Look up the word as a condition
-		if let Some(condition) = symbols.conditions.get(&word) {
-			return Some(Location {
-				uri: uri.clone(),
-				range: condition.location,
-			});
-		}
-
-		None
+		// Entity itself has a definition location
+		let range = model.get_range(entity)?;
+		Some(Location {
+			uri: uri.clone(),
+			range,
+		})
 	}
 
 	pub fn get_hover_content(&self, uri: &Url, position: Position) -> Option<String> {
@@ -326,6 +315,7 @@ fn position_in_range(pos: Position, range: Range) -> bool {
 
 #[cfg(test)]
 mod spec_tests {
+
 	use super::*;
 	use crate::spec::spec_store::SpecStore;
 	use std::sync::Arc;
@@ -1170,4 +1160,612 @@ Resources:
 			Some(NumberOrString::String("WA2_JSON_PARSE".into()))
 		);
 	}
+}
+
+#[cfg(test)]
+mod goto_definition_tests {
+	use super::*;
+
+	fn uri(path: &str) -> Url {
+		Url::parse(path).expect("valid URI")
+	}
+
+	fn test_uri() -> Url {
+		Url::parse("file:///tmp/test.yaml").unwrap()
+	}
+
+	#[test]
+	fn goto_def_ref_to_resource() {
+		let mut engine = CoreEngine::new();
+		let uri = uri("file:///tmp/test.yaml");
+
+		// Line numbers (0-indexed):
+		// 0: (empty)
+		// 1: Resources:
+		// 2:   DataBucket:
+		// 3:     Type: AWS::S3::Bucket
+		// 4:   Consumer:
+		// 5:     Type: AWS::Lambda::Function
+		// 6:     Properties:
+		// 7:       BucketName: !Ref DataBucket
+		let text = r#"
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+  Consumer:
+    Type: AWS::Lambda::Function
+    Properties:
+      BucketName: !Ref DataBucket
+"#;
+
+		engine.on_open(
+			uri.clone(),
+			text.to_string(),
+			"cloudformation-yaml".to_string(),
+		);
+
+		// Position cursor on "DataBucket" in the !Ref (line 7, somewhere in "DataBucket")
+		let position = Position {
+			line: 7,
+			character: 25,
+		};
+
+		let result = engine.goto_definition(&uri, position);
+
+		eprintln!("goto_definition result: {:?}", result);
+
+		assert!(result.is_some(), "Should find definition");
+		let location = result.unwrap();
+		assert_eq!(location.uri, uri);
+		// Should point to line 2 where DataBucket is defined
+		assert_eq!(
+			location.range.start.line, 2,
+			"Should jump to DataBucket definition"
+		);
+	}
+
+	#[test]
+	fn goto_def_ref_to_parameter() {
+		let mut engine = CoreEngine::new();
+		let uri = uri("file:///tmp/test.yaml");
+
+		let text = r#"
+Parameters:
+  Environment:
+    Type: String
+
+Resources:
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref Environment
+"#;
+
+		engine.on_open(
+			uri.clone(),
+			text.to_string(),
+			"cloudformation-yaml".to_string(),
+		);
+
+		if let Ok(template) = CfnTemplate::from_yaml(text, &uri) {
+			engine.analyse_document_slow(&uri);
+		}
+
+		// Position on "Environment" in !Ref
+		// Line 9: `      BucketName: !Ref Environment`
+		// "Environment" starts around char 28
+		let position = Position {
+			line: 9,
+			character: 30,
+		};
+
+		let result = engine.goto_definition(&uri, position);
+
+		eprintln!("goto_definition result: {:?}", result);
+
+		assert!(result.is_some(), "Should find parameter definition");
+		let location = result.unwrap();
+		// Should point to line 2 where Environment parameter is defined
+		assert_eq!(
+			location.range.start.line, 2,
+			"Should jump to Environment parameter"
+		);
+	}
+
+	// 	#[test]
+	// 	fn goto_def_debug_getatt_ranges() {
+	// 		let uri = uri("file:///tmp/test.yaml");
+
+	// 		let text = r#"
+	// Resources:
+	//   MyRole:
+	//     Type: AWS::IAM::Role
+	//     Properties:
+	//       AssumeRolePolicyDocument: {}
+	//   Bucket:
+	//     Type: AWS::S3::Bucket
+	//     Properties:
+	//       RoleArn: !GetAtt MyRole.Arn
+	// "#;
+
+	// 		let template = CfnTemplate::from_yaml(text, &uri).expect("parse");
+	// 		let model = project_vendor_aws(&template).expect("project");
+
+	// 		eprintln!("\n=== All entities with source ranges (GetAtt test) ===");
+	// 		for i in 0..model.entity_count() {
+	// 			let eid = crate::intents::model::EntityId(i as u32);
+	// 			if let Some(range) = model.get_range(eid) {
+	// 				let name = model.qualified_name(eid);
+	// 				let types = model.types(eid);
+	// 				let type_names: Vec<_> = types.iter().map(|&t| model.qualified_name(t)).collect();
+	// 				eprintln!("  {} : {:?} @ {:?}", name, type_names, range);
+	// 			}
+	// 		}
+
+	// 		// Check cfn:GetAtt type exists
+	// 		if let Some(cfn_getatt) = model.resolve("cfn:GetAtt") {
+	// 			eprintln!("\ncfn:GetAtt type: {:?}", cfn_getatt);
+	// 		} else {
+	// 			eprintln!("\ncfn:GetAtt: NOT FOUND");
+	// 		}
+
+	// 		// Print line 9 for reference
+	// 		let lines: Vec<&str> = text.lines().collect();
+	// 		eprintln!("\nLine 9: '{}'", lines.get(9).unwrap_or(&"<none>"));
+
+	// 		// Try entity_at_position
+	// 		let getatt_position = Position {
+	// 			line: 9,
+	// 			character: 20,
+	// 		};
+	// 		eprintln!("\n=== entity_at_position({:?}) ===", getatt_position);
+	// 		if let Some(entity) = model.entity_at_position(getatt_position) {
+	// 			let name = model.qualified_name(entity);
+	// 			eprintln!("  Found: {}", name);
+	// 		} else {
+	// 			eprintln!("  No entity found at position");
+	// 		}
+	// 	}
+
+	// 	#[test]
+	// 	fn goto_def_getatt_to_resource() {
+	// 		let mut engine = CoreEngine::new();
+	// 		let uri = uri("file:///tmp/test.yaml");
+
+	// 		let text = r#"
+	// Resources:
+	//   MyRole:
+	//     Type: AWS::IAM::Role
+	//     Properties:
+	//       AssumeRolePolicyDocument: {}
+	//   Bucket:
+	//     Type: AWS::S3::Bucket
+	//     Properties:
+	//       RoleArn: !GetAtt MyRole.Arn
+	// "#;
+
+	// 		engine.on_open(
+	// 			uri.clone(),
+	// 			text.to_string(),
+	// 			"cloudformation-yaml".to_string(),
+	// 		);
+
+	// 		if let Ok(template) = CfnTemplate::from_yaml(text, &uri) {
+	// 			engine.analyse_document_slow(&template, &uri);
+	// 		}
+
+	// 		// Line 9: '      RoleArn: !GetAtt MyRole.Arn'
+	// 		// GetAtt range is char 23-33 (just "MyRole.Arn" not "!GetAtt")
+	// 		// Position must be INSIDE that range
+	// 		let position = Position {
+	// 			line: 9,
+	// 			character: 25,
+	// 		};
+
+	// 		let result = engine.goto_definition(&uri, position);
+
+	// 		eprintln!("goto_definition result: {:?}", result);
+
+	// 		assert!(result.is_some(), "Should find resource definition");
+	// 		let location = result.unwrap();
+	// 		assert_eq!(
+	// 			location.range.start.line, 2,
+	// 			"Should jump to MyRole definition"
+	// 		);
+	// 	}
+
+	// 	#[test]
+	// 	fn goto_def_debug_parameter_ranges() {
+	// 		let uri = uri("file:///tmp/test.yaml");
+
+	// 		let text = r#"
+	// Parameters:
+	//   Environment:
+	//     Type: String
+
+	// Resources:
+	//   Bucket:
+	//     Type: AWS::S3::Bucket
+	//     Properties:
+	//       BucketName: !Ref Environment
+	// "#;
+
+	// 		let template = CfnTemplate::from_yaml(text, &uri).expect("parse");
+
+	// 		eprintln!("\n=== Parameters from parser ===");
+	// 		for (name, param) in &template.parameters {
+	// 			eprintln!("  {}: name_range={:?}", name, param.name_range);
+	// 		}
+
+	// 		let model = project_vendor_aws(&template).expect("project");
+
+	// 		eprintln!("\n=== All entities with source ranges ===");
+	// 		for i in 0..model.entity_count() {
+	// 			let eid = crate::intents::model::EntityId(i as u32);
+	// 			if let Some(range) = model.get_range(eid) {
+	// 				let name = model.qualified_name(eid);
+	// 				let types = model.types(eid);
+	// 				let type_names: Vec<_> = types.iter().map(|&t| model.qualified_name(t)).collect();
+	// 				eprintln!("  {} : {:?} @ {:?}", name, type_names, range);
+	// 			}
+	// 		}
+
+	// 		// Check if Environment entity exists and what it's linked to
+	// 		if let Some(env) = model.resolve("Environment") {
+	// 			eprintln!("\nEnvironment entity: {:?}", env);
+	// 			eprintln!(
+	// 				"  types: {:?}",
+	// 				model
+	// 					.types(env)
+	// 					.iter()
+	// 					.map(|&t| model.qualified_name(t))
+	// 					.collect::<Vec<_>>()
+	// 			);
+	// 			eprintln!("  range: {:?}", model.get_range(env));
+	// 		} else {
+	// 			eprintln!("\nEnvironment: NOT FOUND in model.resolve()");
+	// 		}
+
+	// 		// Find the Ref node and check its cfn:target
+	// 		eprintln!("\n=== Checking cfn:Ref nodes ===");
+	// 		if let Some(cfn_ref_type) = model.resolve("cfn:Ref") {
+	// 			for i in 0..model.entity_count() {
+	// 				let eid = crate::intents::model::EntityId(i as u32);
+	// 				if model.has_type(eid, cfn_ref_type) {
+	// 					eprintln!("  Found Ref node: {:?}", eid);
+	// 					if let Some(cfn_target) = model.resolve("cfn:target") {
+	// 						let targets = model.get_all(eid, cfn_target);
+	// 						for target in &targets {
+	// 							if let Some(target_id) = target.as_entity() {
+	// 								eprintln!(
+	// 									"    -> target: {} @ {:?}",
+	// 									model.qualified_name(target_id),
+	// 									model.get_range(target_id)
+	// 								);
+	// 							}
+	// 						}
+	// 					}
+	// 				}
+	// 			}
+	// 		}
+	// 	}
+
+	// 	#[test]
+	// 	fn goto_def_no_match_at_position() {
+	// 		let mut engine = CoreEngine::new();
+	// 		let uri = uri("file:///tmp/test.yaml");
+
+	// 		let text = r#"
+	// Resources:
+	//   Bucket:
+	//     Type: AWS::S3::Bucket
+	// "#;
+
+	// 		engine.on_open(
+	// 			uri.clone(),
+	// 			text.to_string(),
+	// 			"cloudformation-yaml".to_string(),
+	// 		);
+
+	// 		if let Ok(template) = CfnTemplate::from_yaml(text, &uri) {
+	// 			engine.analyse_document_slow(&template, &uri);
+	// 		}
+
+	// 		// Position on "Resources:" keyword - not an entity
+	// 		let position = Position {
+	// 			line: 1,
+	// 			character: 5,
+	// 		};
+
+	// 		let result = engine.goto_definition(&uri, position);
+
+	// 		eprintln!("goto_definition result: {:?}", result);
+
+	// 		// Should return None - no navigable entity at this position
+	// 		assert!(result.is_none(), "Should not find definition at keyword");
+	// 	}
+
+	// 	#[test]
+	// 	fn goto_def_debug_model_ranges() {
+	// 		// Debug test to see what ranges are actually stored
+	// 		let uri = uri("file:///tmp/test.yaml");
+
+	// 		let text = r#"
+	// Resources:
+	//   DataBucket:
+	//     Type: AWS::S3::Bucket
+	//   Consumer:
+	//     Type: AWS::Lambda::Function
+	//     Properties:
+	//       BucketName: !Ref DataBucket
+	// "#;
+
+	// 		let template = CfnTemplate::from_yaml(text, &uri).expect("parse");
+	// 		let model = project_vendor_aws(&template).expect("project");
+
+	// 		eprintln!("\n=== Model entities with ranges ===");
+
+	// 		// Check what entities exist and their ranges
+	// 		if let Some(data_bucket) = model.resolve("DataBucket") {
+	// 			eprintln!("DataBucket entity: {:?}", data_bucket);
+	// 			eprintln!("  range: {:?}", model.get_range(data_bucket));
+	// 		} else {
+	// 			eprintln!("DataBucket: NOT FOUND");
+	// 		}
+
+	// 		if let Some(consumer) = model.resolve("Consumer") {
+	// 			eprintln!("Consumer entity: {:?}", consumer);
+	// 			eprintln!("  range: {:?}", model.get_range(consumer));
+	// 		} else {
+	// 			eprintln!("Consumer: NOT FOUND");
+	// 		}
+
+	// 		// Check cfn:Ref type exists
+	// 		if let Some(cfn_ref) = model.resolve("cfn:Ref") {
+	// 			eprintln!("cfn:Ref type: {:?}", cfn_ref);
+	// 		} else {
+	// 			eprintln!("cfn:Ref: NOT FOUND - ensure_cfn_types not called?");
+	// 		}
+
+	// 		// Dump all source ranges
+	// 		eprintln!("\n=== All entities with source ranges ===");
+	// 		for i in 0..model.entity_count() {
+	// 			let eid = crate::intents::model::EntityId(i as u32);
+	// 			if let Some(range) = model.get_range(eid) {
+	// 				let name = model.qualified_name(eid);
+	// 				let types = model.types(eid);
+	// 				let type_names: Vec<_> = types.iter().map(|&t| model.qualified_name(t)).collect();
+	// 				eprintln!("  {} : {:?} @ {:?}", name, type_names, range);
+	// 			}
+	// 		}
+
+	// 		// Try entity_at_position for the Ref location
+	// 		let ref_position = Position {
+	// 			line: 7,
+	// 			character: 25,
+	// 		};
+	// 		eprintln!("\n=== entity_at_position({:?}) ===", ref_position);
+	// 		if let Some(entity) = model.entity_at_position(ref_position) {
+	// 			let name = model.qualified_name(entity);
+	// 			let types = model.types(entity);
+	// 			let type_names: Vec<_> = types.iter().map(|&t| model.qualified_name(t)).collect();
+	// 			eprintln!("  Found: {} : {:?}", name, type_names);
+	// 			eprintln!("  Range: {:?}", model.get_range(entity));
+	// 		} else {
+	// 			eprintln!("  No entity found at position");
+	// 		}
+	// 	}
+
+	// 	#[test]
+	// 	fn goto_def_ref_in_outputs() {
+	// 		let mut engine = CoreEngine::new();
+	// 		let uri = uri("file:///tmp/test.yaml");
+
+	// 		let text = r#"AWSTemplateFormatVersion: "2010-09-09"
+	// Resources:
+	//   DataBucket:
+	//     Type: AWS::S3::Bucket
+	// Outputs:
+	//   DataBucketName:
+	//     Value: !Ref DataBucket
+	//   DataBucketArn:
+	//     Value: !GetAtt DataBucket.Arn
+	// "#;
+
+	// 		engine.on_open(
+	// 			uri.clone(),
+	// 			text.to_string(),
+	// 			"cloudformation-yaml".to_string(),
+	// 		);
+
+	// 		if let Ok(template) = CfnTemplate::from_yaml(text, &uri) {
+	// 			engine.analyse_document_slow(&template, &uri);
+	// 		}
+
+	// 		// Line 6: "    Value: !Ref DataBucket"
+	// 		// !Ref starts around char 11, "DataBucket" around char 16
+	// 		let position = Position {
+	// 			line: 6,
+	// 			character: 20,
+	// 		};
+
+	// 		let result = engine.goto_definition(&uri, position);
+	// 		eprintln!("goto_definition result: {:?}", result);
+
+	// 		assert!(result.is_some(), "Should find definition from Outputs Ref");
+	// 	}
+
+	// 	#[test]
+	// 	fn goto_def_sub_variable_reference() {
+	// 		let mut engine = CoreEngine::new();
+	// 		let uri = uri("file:///tmp/test.yaml");
+
+	// 		// Line numbers (0-indexed):
+	// 		// 0: Parameters:
+	// 		// 1:   DataBucketName:
+	// 		// 2:     Type: String
+	// 		// 3: Resources:
+	// 		// 4:   MyPolicy:
+	// 		// 5:     Type: AWS::IAM::Policy
+	// 		// 6:     Properties:
+	// 		// 7:       Resource: !Sub "arn:${AWS::Partition}:s3:::${DataBucketName}/*"
+	// 		let text = r#"Parameters:
+	//   DataBucketName:
+	//     Type: String
+	// Resources:
+	//   MyPolicy:
+	//     Type: AWS::IAM::Policy
+	//     Properties:
+	//       Resource: !Sub "arn:${AWS::Partition}:s3:::${DataBucketName}/*"
+	// "#;
+
+	// 		engine.on_open(
+	// 			uri.clone(),
+	// 			text.to_string(),
+	// 			"cloudformation-yaml".to_string(),
+	// 		);
+
+	// 		if let Ok(template) = CfnTemplate::from_yaml(text, &uri) {
+	// 			engine.analyse_document_slow(&template, &uri);
+	// 		}
+
+	// 		// Line 7: '      Resource: !Sub "arn:${AWS::Partition}:s3:::${DataBucketName}/*"'
+	// 		// "DataBucketName" starts around character 51
+	// 		let position = Position {
+	// 			line: 7,
+	// 			character: 53,
+	// 		};
+
+	// 		let result = engine.goto_definition(&uri, position);
+	// 		eprintln!("goto_definition result: {:?}", result);
+
+	// 		assert!(
+	// 			result.is_some(),
+	// 			"Should find definition for Sub variable reference"
+	// 		);
+	// 		let location = result.unwrap();
+	// 		// Should point to line 1 where DataBucketName parameter is defined
+	// 		assert_eq!(
+	// 			location.range.start.line, 1,
+	// 			"Should jump to DataBucketName parameter"
+	// 		);
+	// 	}
+
+	// 	#[test]
+	// 	fn goto_def_sub_pseudo_parameter() {
+	// 		let mut engine = CoreEngine::new();
+	// 		let uri = uri("file:///tmp/test.yaml");
+
+	// 		let text = r#"Resources:
+	//   MyPolicy:
+	//     Type: AWS::IAM::Policy
+	//     Properties:
+	//       Resource: !Sub "arn:${AWS::Partition}:s3:::mybucket/*"
+	// "#;
+
+	// 		engine.on_open(
+	// 			uri.clone(),
+	// 			text.to_string(),
+	// 			"cloudformation-yaml".to_string(),
+	// 		);
+
+	// 		if let Ok(template) = CfnTemplate::from_yaml(text, &uri) {
+	// 			engine.analyse_document_slow(&template, &uri);
+	// 		}
+
+	// 		// Line 4: '      Resource: !Sub "arn:${AWS::Partition}:s3:::mybucket/*"'
+	// 		// "AWS::Partition" starts around character 27
+	// 		let position = Position {
+	// 			line: 4,
+	// 			character: 30,
+	// 		};
+
+	// 		let result = engine.goto_definition(&uri, position);
+	// 		eprintln!("goto_definition result: {:?}", result);
+
+	// 		// Pseudo-parameters don't have source locations, so this might return None
+	// 		// or could return the pseudo-parameter's synthetic location
+	// 		// For now, just document the behavior
+	// 		eprintln!("Note: Pseudo-parameters may not have goto_definition support");
+	// 	}
+
+	// 	#[test]
+	// 	fn goto_def_debug_sub_var_refs() {
+	// 		let uri = uri("file:///tmp/test.yaml");
+
+	// 		let text = r#"Parameters:
+	//   DataBucketName:
+	//     Type: String
+	// Resources:
+	//   MyPolicy:
+	//     Type: AWS::IAM::Policy
+	//     Properties:
+	//       Resource: !Sub "arn:${AWS::Partition}:s3:::${DataBucketName}/*"
+	// "#;
+
+	// 		// Print line 7 for reference
+	// 		let lines: Vec<&str> = text.lines().collect();
+	// 		eprintln!("\nLine 7: '{}'", lines.get(7).unwrap_or(&"<none>"));
+
+	// 		// Print character positions
+	// 		if let Some(line) = lines.get(7) {
+	// 			eprintln!("Character positions:");
+	// 			for (i, c) in line.chars().enumerate() {
+	// 				if c == '$' || c == '{' || c == '}' {
+	// 					eprintln!("  char {}: '{}'", i, c);
+	// 				}
+	// 			}
+	// 		}
+
+	// 		let template = CfnTemplate::from_yaml(text, &uri).expect("parse");
+	// 		let model = project_vendor_aws(&template).expect("project");
+
+	// 		eprintln!("\n=== All entities with source ranges ===");
+	// 		for i in 0..model.entity_count() {
+	// 			let eid = crate::intents::model::EntityId(i as u32);
+	// 			if let Some(range) = model.get_range(eid) {
+	// 				let name = model.qualified_name(eid);
+	// 				let types = model.types(eid);
+	// 				let type_names: Vec<_> = types.iter().map(|&t| model.qualified_name(t)).collect();
+	// 				eprintln!("  {} : {:?} @ {:?}", name, type_names, range);
+	// 			}
+	// 		}
+
+	// 		// Check for SubVarRef nodes specifically
+	// 		eprintln!("\n=== SubVarRef nodes ===");
+	// 		if let Some(sub_var_ref_type) = model.resolve("cfn:SubVarRef") {
+	// 			for i in 0..model.entity_count() {
+	// 				let eid = crate::intents::model::EntityId(i as u32);
+	// 				if model.has_type(eid, sub_var_ref_type) {
+	// 					eprintln!("  {:?} @ {:?}", eid, model.get_range(eid));
+	// 					if let Some(cfn_target) = model.resolve("cfn:target") {
+	// 						let targets = model.get_all(eid, cfn_target);
+	// 						for target in &targets {
+	// 							if let Some(target_id) = target.as_entity() {
+	// 								eprintln!("    -> target: {}", model.qualified_name(target_id));
+	// 							}
+	// 						}
+	// 					}
+	// 				}
+	// 			}
+	// 		} else {
+	// 			eprintln!("  cfn:SubVarRef type not found!");
+	// 		}
+
+	// 		// Test entity_at_position for the variable
+	// 		let position = Position {
+	// 			line: 7,
+	// 			character: 53,
+	// 		};
+	// 		eprintln!("\n=== entity_at_position({:?}) ===", position);
+	// 		if let Some(entity) = model.entity_at_position(position) {
+	// 			let name = model.qualified_name(entity);
+	// 			let types = model.types(entity);
+	// 			let type_names: Vec<_> = types.iter().map(|&t| model.qualified_name(t)).collect();
+	// 			eprintln!("  Found: {} : {:?}", name, type_names);
+	// 			eprintln!("  Range: {:?}", model.get_range(entity));
+	// 		} else {
+	// 			eprintln!("  No entity found at position");
+	// 		}
+	// 	}
 }

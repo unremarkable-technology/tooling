@@ -315,7 +315,7 @@ impl LanguageServer for Backend {
 		self.client
 			.log_message(
 				MessageType::INFO,
-				format!("goto_definition: uri={}, position={:?}", uri, position),
+				format!("goto_definition(m): uri={}, position={:?}", uri, position),
 			)
 			.await;
 
@@ -436,12 +436,12 @@ async fn analyser_loop(
 			};
 
 			match parse_result {
-				Ok(template) => {
+				Ok(_template) => {
 					// Fast path succeeded with no diagnostics
 					// Run slow path (WA2 guidance)
 					let wa2_diagnostics = {
 						let mut engine_guard = engine.lock().unwrap();
-						engine_guard.analyse_document_slow(&template, &uri)
+						engine_guard.analyse_document_slow(&uri)
 					};
 
 					// Publish WA2 guidance diagnostics
