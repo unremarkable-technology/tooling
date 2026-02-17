@@ -15,7 +15,7 @@ mod tests {
 			model::{Query, print_model_as_tree},
 			vendor::{DocumentFormat, Method, Vendor, get_projector},
 		},
-		spec::{spec_cache::SpecCacheManager, spec_source::SpecSource, spec_store::SpecStore},
+		iaac::cloudformation::{spec_cache::SpecCacheManager, spec_source::SpecSource, spec_store::SpecStore},
 	};
 
 	/// Loads the real CFN spec (blocking). Cached after first call.

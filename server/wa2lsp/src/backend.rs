@@ -9,8 +9,8 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::core_engine::CoreEngine;
-use crate::spec::spec_cache::SpecCacheManager;
-use crate::spec::spec_source::SpecSource;
+use crate::iaac::cloudformation::spec_cache::SpecCacheManager;
+use crate::iaac::cloudformation::spec_source::SpecSource;
 
 /// backend: LSP-facing adapter that holds the engine and schedules work
 pub struct Backend {

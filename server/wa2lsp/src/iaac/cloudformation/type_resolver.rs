@@ -2,8 +2,8 @@
 //!
 //! Given a CfnValue, resolves what TypeInfo it produces at runtime.
 
-use crate::spec::cfn_ir::types::CfnValue;
-use crate::spec::spec_store::CollectionKind;
+use crate::iaac::cloudformation::cfn_ir::types::CfnValue;
+use crate::iaac::cloudformation::spec_store::CollectionKind;
 
 use super::spec_store::{
 	AttributeName, PrimitiveType, ResourceTypeId, ShapeKind, SpecStore, TypeInfo,
@@ -338,7 +338,7 @@ fn pseudo_parameter_type(name: &str) -> Option<TypeInfo> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::spec::cfn_ir::types::CfnTemplate;
+	use crate::iaac::cloudformation::cfn_ir::types::CfnTemplate;
 	use url::Url;
 
 	fn test_uri() -> Url {

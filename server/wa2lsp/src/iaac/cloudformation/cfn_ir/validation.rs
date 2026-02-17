@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Range};
 
-use crate::spec::{
+use crate::iaac::cloudformation::{
 	cfn_ir::types::{CfnTemplate, CfnValue},
 	code_utils::names,
 	spec_store::{
@@ -792,7 +792,7 @@ impl CfnTemplate {
 							candidates.extend(symbols.resources.keys().map(|s| s.as_str()));
 							candidates.extend(symbols.parameters.keys().map(|s| s.as_str()));
 							candidates.extend(symbols.pseudo_parameters.keys().map(|s| s.as_str()));
-							let suggestion_data = crate::spec::code_utils::names::find_closest(
+							let suggestion_data = crate::iaac::cloudformation::code_utils::names::find_closest(
 								&var_ref,
 								candidates.into_iter(),
 							);
@@ -889,7 +889,7 @@ impl CfnTemplate {
 				if !symbols.has_condition(condition_name) {
 					let candidates = symbols.conditions.keys().map(|s| s.as_str());
 					let suggestion_data =
-						crate::spec::code_utils::names::find_closest(condition_name, candidates);
+						crate::iaac::cloudformation::code_utils::names::find_closest(condition_name, candidates);
 
 					let message = if let Some((suggested, _)) = suggestion_data {
 						format!(
@@ -942,7 +942,7 @@ impl CfnTemplate {
 				if !symbols.has_condition(condition_name) {
 					let candidates = symbols.conditions.keys().map(|s| s.as_str());
 					let suggestion_data =
-						crate::spec::code_utils::names::find_closest(condition_name, candidates);
+						crate::iaac::cloudformation::code_utils::names::find_closest(condition_name, candidates);
 
 					let message = if let Some((suggested, _)) = suggestion_data {
 						format!(
@@ -1127,12 +1127,12 @@ Resources:
 	let content = fs::read_to_string(&ec2_schema).expect("Schema exists");
 
 	let parsed =
-		crate::spec::registry_store::parse_resource_schema("aws-ec2-instance.json", &content)
+		crate::iaac::cloudformation::registry_store::parse_resource_schema("aws-ec2-instance.json", &content)
 			.expect("Parse")
 			.expect("Descriptor");
 
 	// Create a minimal spec store
-	use crate::spec::spec_store::{ResourceTypeId, SpecStore};
+	use crate::iaac::cloudformation::spec_store::{ResourceTypeId, SpecStore};
 	use std::collections::HashMap;
 
 	let mut resources = HashMap::new();

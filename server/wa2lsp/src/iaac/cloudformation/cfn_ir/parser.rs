@@ -1,6 +1,6 @@
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticRelatedInformation, Location, Position, Range};
 
-use crate::spec::{
+use crate::iaac::cloudformation::{
 	cfn_ir::types::{CfnAssertion, CfnMapping, CfnOutput, CfnRule},
 	intrinsics::IntrinsicKind,
 };
@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 use tower_lsp::lsp_types::{DiagnosticSeverity, NumberOrString};
 use url::Url;
 
-use crate::spec::cfn_ir::types::CfnValue;
+use crate::iaac::cloudformation::cfn_ir::types::CfnValue;
 
 use super::types::{CfnCondition, CfnParameter, CfnResource, CfnTemplate};
 

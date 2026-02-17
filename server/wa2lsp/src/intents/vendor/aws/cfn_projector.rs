@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 use tower_lsp::lsp_types::{Position, Range};
 
 use crate::intents::model::{EntityId, Model, ModelError};
-use crate::spec::cfn_ir::types::{CFN_INTRINSICS, CfnOutput, CfnParameter, CfnResource, CfnValue};
+use crate::iaac::cloudformation::cfn_ir::types::{CFN_INTRINSICS, CfnOutput, CfnParameter, CfnResource, CfnValue};
 
 /// Extract Sub template variables with their positions within the template string
 /// Returns Vec<(variable_name, start_offset, end_offset)> where offsets are byte positions

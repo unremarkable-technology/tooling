@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity};
 use url::Url;
-use wa2lsp::spec::{
+use wa2lsp::iaac::cloudformation::{
 	cfn_ir::types::CfnTemplate, spec_cache::SpecCacheManager, spec_source::SpecSource,
 	spec_store::SpecStore,
 };

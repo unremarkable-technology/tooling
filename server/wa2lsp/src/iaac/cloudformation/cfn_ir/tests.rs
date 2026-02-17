@@ -1,11 +1,11 @@
 use url::Url;
 
-use crate::spec::cfn_ir::types::CfnValue;
-use crate::spec::spec_store::{
+use crate::iaac::cloudformation::cfn_ir::types::CfnValue;
+use crate::iaac::cloudformation::spec_store::{
 	CollectionKind, PrimitiveType, PropertyName, PropertyShape, ResourceTypeDescriptor,
 	ResourceTypeId, ShapeKind, SpecStore, TypeInfo,
 };
-use crate::spec::{
+use crate::iaac::cloudformation::{
 	cfn_ir::types::CfnTemplate,
 	spec_store::{AttributeName, AttributeShape},
 };

@@ -411,7 +411,7 @@ fn verify_ec2_instance_oneof_captured() {
 	eprintln!("\n=== EC2::Instance Resource ===");
 
 	// Check LaunchTemplate property
-	let lt_prop_name = crate::spec::spec_store::PropertyName("LaunchTemplate".to_string());
+	let lt_prop_name = crate::iaac::cloudformation::spec_store::PropertyName("LaunchTemplate".to_string());
 	if let Some(lt_prop) = parsed.properties.get(&lt_prop_name) {
 		eprintln!("\nLaunchTemplate property found:");
 		eprintln!("  Type: {:?}", lt_prop.type_info);

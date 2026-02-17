@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::spec::cfn_ir::types::{CfnParameter, CfnResource, CfnTemplate, CfnValue};
+use crate::iaac::cloudformation::cfn_ir::types::{CfnParameter, CfnResource, CfnTemplate, CfnValue};
 
 impl fmt::Display for CfnTemplate {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

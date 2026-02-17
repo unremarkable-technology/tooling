@@ -2,10 +2,10 @@ use saphyr::{LoadableYamlNode, MarkedYaml, Scalar, ScanError, YamlData};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 use url::Url;
 
-use crate::spec::cfn_ir::types::CfnTemplate;
-use crate::spec::intrinsics::{self, IntrinsicKind};
+use crate::iaac::cloudformation::cfn_ir::types::CfnTemplate;
+use crate::iaac::cloudformation::intrinsics::{self, IntrinsicKind};
 
-use crate::spec::cfn_ir::parser::{self, CfnParser, ObjectEntry};
+use crate::iaac::cloudformation::cfn_ir::parser::{self, CfnParser, ObjectEntry};
 
 impl CfnTemplate {
 	/// Parse a CloudFormation template from YAML text

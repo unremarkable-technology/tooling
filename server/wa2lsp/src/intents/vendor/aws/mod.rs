@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::{Diagnostic, Url};
 
 use crate::intents::model::Model;
 use crate::intents::vendor::{DocumentFormat, ProjectionResult, VendorProjector};
-use crate::spec::cfn_ir::types::CfnTemplate;
+use crate::iaac::cloudformation::cfn_ir::types::CfnTemplate;
 
 /// AWS CloudFormation projector
 pub struct AwsCfnProjector;

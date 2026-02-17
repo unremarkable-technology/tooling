@@ -9,7 +9,7 @@ use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::spec::registry_store;
+use crate::iaac::cloudformation::registry_store;
 
 use super::spec_source::{SpecDownload, SpecSource, SpecSourceError};
 use super::spec_store::SpecStore;

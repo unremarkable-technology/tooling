@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use tower_lsp::lsp_types::Range;
 
-use crate::spec::cfn_ir::types::CfnTemplate;
+use crate::iaac::cloudformation::cfn_ir::types::CfnTemplate;
 
 /// Symbol table built from a CloudFormation template
 #[derive(Debug, Clone)]

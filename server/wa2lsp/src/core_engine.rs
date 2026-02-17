@@ -10,7 +10,7 @@ use crate::{
 		model::Model,
 		vendor::{DocumentFormat, Method, Vendor, get_projector},
 	},
-	spec::{cfn_ir::types::CfnTemplate, spec_store::SpecStore},
+   iaac::cloudformation::{cfn_ir::types::CfnTemplate, spec_store::SpecStore},
 };
 
 /// per-document state held by the core engine
@@ -293,7 +293,7 @@ fn position_in_range(pos: Position, range: Range) -> bool {
 mod spec_tests {
 
 	use super::*;
-	use crate::spec::spec_store::SpecStore;
+	use crate::iaac::cloudformation::spec_store::SpecStore;
 	use std::sync::Arc;
 	use tower_lsp::lsp_types::DiagnosticSeverity;
 
