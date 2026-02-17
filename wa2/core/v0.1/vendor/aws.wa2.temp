@@ -1,0 +1,57 @@
+namespace s3 {
+	// S3 bucket is storage
+	store bucket {
+		field sensitivity: data/sensitivity
+		field criticality: data/criticality
+		field protection: data/protection
+
+		protection = ?(exists(.//ReplicationConfiguration/Rules[Status = "Enabled"]))
+	}
+}
+
+/*-------------------------------
+	Address & reference types
+-------------------------------*/
+// Prefix list IDs, SG IDs, etc.
+type prefix_list_reference: text
+type security_group_reference: text
+
+/*-------------------------------
+	Security Group Address Choice
+-------------------------------*/
+enum security_group_address {
+	ipv4(network/ipv4_masked)
+	ipv6(network/ipv6_masked)
+	prefix_list(prefix_list_reference)
+	security_group(security_group_reference)
+}
+
+/*-------------------------------
+	Security Group Rule
+-------------------------------*/
+struct security_group_rule {
+
+	// 6 = TCP, 17 = UDP, 1/58 = ICMPv4/ICMPv6, etc.
+	field protocol: number
+
+	// Optional depending on protocol
+	field port_range: network/ports/port_range?
+
+	field icmp_header: network/icmp/icmp_header?
+
+	field source: security_group_address
+	field destination: security_group_address
+
+	@#meta(description = "operator-visible comment")
+	field description: text
+}
+
+/*-------------------------------
+	Security Group (network control definition)
+-------------------------------*/
+@#security/control/network(kind = firewall(stateful))
+struct security_group {
+	field name: text
+	field description: text
+	field rules: security_group_rule[]
+}

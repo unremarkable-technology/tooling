@@ -36,12 +36,11 @@ project backups {
 // Policy
 // -----------------------------------------------------------------------------
 policy critical_storage_is_backed_up {
-
 	// critical storage
 	let critical = ?(
-		//store[
-			@criticality = MissionCritical
-			or @criticality = BusinessCritical
+		//wa2:store[
+			criticality = MissionCritical
+			or criticality = BusinessCritical
 		]
 	)
 
@@ -49,7 +48,7 @@ policy critical_storage_is_backed_up {
 	assert ?(
 		not(
 			exists(
-				critical[ not @protection ]
+				critical[ not protection ]
 			)
 		)
 	)

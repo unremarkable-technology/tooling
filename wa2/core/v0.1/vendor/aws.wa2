@@ -1,60 +1,51 @@
 #!/usr/bin/env wa2
 !version 0.1
 
-namespace s3 {
-	// S3 bucket is storage
-	store bucket {
-		field sensitivity: data/sensitivity
-		field criticality: data/criticality
-		field protection: data/protection
+// how do we map user defined tags into our structure?
+map aws_tags_to_wa2 {
+   let cfn_tags = ?(
+		aws:*//Tags/*
+	)
 
-		protection = ?(exists(.//ReplicationConfiguration/Rules[Status = "Enabled"]))
-	}
+   let criticality_tags = ?(cfn_tags[@Key = "DataCriticality"])
+
+	match criticality *(
+	   criticality_tags,
+	   aws:Value ~(
+         "important" => /wa2:data/wa2:criticality/business,
+         "medium" => /wa2:data/wa2:criticality/xyz,
+         "low" => /wa2:data/wa2:criticality/blah,
+      )
+   )
+
+   +(criticality[0], /wa2:data/wa2:criticality, criticality[2])
 }
 
-/*-------------------------------
-	Address & reference types
--------------------------------*/
-// Prefix list IDs, SG IDs, etc.
-type prefix_list_reference: text
-type security_group_reference: text
+// maps from aws specific service types into wa2:type (wa2:store, wa2:run, wa2:move)
+map aws_resources_to_wa2 {
+   let aws_stores = ?(
+      //aws:resource[
+         aws:type in (
+            "AWS::EC2::Volume",
+            "AWS::EFS::FileSystem",
+            "AWS::S3::Bucket",
+         )
+      ]
+   )
 
-/*-------------------------------
-	Security Group Address Choice
--------------------------------*/
-enum security_group_address {
-	ipv4(network/ipv4_masked)
-	ipv6(network/ipv6_masked)
-	prefix_list(prefix_list_reference)
-	security_group(security_group_reference)
+   +(aws_stores, wa2:type, wa2:store)
 }
 
-/*-------------------------------
-	Security Group Rule
--------------------------------*/
-struct security_group_rule {
+// why "data" and not "store"?
 
-	// 6 = TCP, 17 = UDP, 1/58 = ICMPv4/ICMPv6, etc.
-	field protocol: number
-
-	// Optional depending on protocol
-	field port_range: network/ports/port_range?
-
-	field icmp_header: network/icmp/icmp_header?
-
-	field source: security_group_address
-	field destination: security_group_address
-
-	@#meta(description = "operator-visible comment")
-	field description: text
-}
-
-/*-------------------------------
-	Security Group (network control definition)
--------------------------------*/
-@#security/control/network(kind = firewall(stateful))
-struct security_group {
-	field name: text
-	field description: text
-	field rules: security_group_rule[]
-}
+/* verb (map, policy, evidence) probably wrong, and maybe map is same as evidence anyway?
+   ordering does not matter, we eval all until a loop add no more predicates
+ * map aws data storage resources into wa2:store
+      aws:*[aws:type in (AWS::S3::Bucket, AWS::EC2::Volume)]
+ * policy all wa2:store in aws must have data tags
+      wa2:store[ EXISTS(aws:tags[ aws:key ALL (criticality, sensitivity) ]) ]
+ * evidence wa2:store in aws with data recoverability levels
+      aws:*[aws:type in (AWS::S3::Bucket, AWS::EC2::Volume)]
+ * policy all wa2:store in aws have data recorverability evidence
+      wa2:store[aws:*] with data:recoverability
+*/

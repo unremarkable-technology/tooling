@@ -1,0 +1,230 @@
+#!/usr/bin/env wa2
+!version 0.1
+
+// we need to tell the system how to map information we might use
+// for example in constraints we want to limit to decl with "in" io directions
+namespace _internal {
+	@#meta(description = "supported nodes")
+	type link_annotation: present
+
+	@#meta(description = "supported nodes")
+	type node_types: enum {run, store, move, engine}
+
+	@#meta(description = "xyz in a node")
+	type node_decl_types: enum {io, node, pipe}
+
+	@#meta(description = "types of nodes")
+	type decl_io_directions: enum {in, out}
+
+	namespace native {
+		type rust: text
+		type parser: text
+	}
+
+	// reserved for implementation mapping to token ids
+	type token: enum {field, io, pipe}
+}
+
+namespace meta {
+	@#meta(description = "meaning of element", annotation)
+	type description: text 
+
+	@#meta(description = "can be used for annotation")
+	type annotation: flag 
+
+	namespace constraint {
+		@#meta(description = "constrains context to match regular expression")
+		type regex: text
+
+		@#meta(description = "constrains context to match io type")
+		type io_direction : decl_io_directions
+	}
+
+	namespace reference {
+		type field: _internal/token/field
+		type io:    _internal/token/io
+		type pipe:  _internal/token/pipe
+	}
+}
+
+namespace security {
+	@#meta(description = "how trustworthy")
+	type level: enum {trusted, internal, untrusted}
+
+	@#meta(description = "security role being used")
+	type principal: text 
+
+	namespace data {
+		// how sensitive the data is (confidentiality)
+		type sensitivity: enum {
+			Public,
+			Proprietary,
+			Private,
+			Confidential,
+			Sensitive
+		}
+
+		// how bad it is to lose the data (availability / impact)
+		type criticality: enum {
+			Disposable         // safe to lose
+			NonCritical,       // inconvenience only
+			Important,         // painful but survivable
+			BusinessCritical,  // major financial or operational impact
+			MissionCritical,   // existential / legal / safety impact
+		}
+
+		// how well can we recover data
+		type protection: enum {
+			None,         		// loss likely
+			Backup,        		// loss limited to gap in point-in-time copies
+			Replication,   		// loss limited to replication latency
+			Synchronous,   		// no loss under normal failure scenarios
+		}
+
+		// how close are two nodes
+		type proximity: enum {
+			CoLocated,			// same rack
+			Local,				// same facility, <1km
+			Campus,				// same site, <5km
+			Metro,				// <50km
+			Regional,			// 100-500km
+			CrossRegion,		// >500km, same continent
+			Intercontinental,	// different continent
+		}
+	}
+
+	namespace control {
+
+		namespace network {
+			type statefulness: enum {stateful, stateless}
+
+			// classification of the control itself
+			type kind: enum {
+				firewall(statefulness)
+				// later: waf(statefulness), proxy(...), etc.
+			}
+
+			// attachment: this IO / field is guarded by some network control
+			type guard: meta/reference/field
+		}
+
+		namespace sdlc {
+			// classification of SDLC controls
+			type kind: enum {
+				sast
+				dependency_scanner
+			}
+
+			// attachment: this IO / field is guarded by some SDLC control
+			type guard: meta/reference/field
+		}
+	}
+
+	/*-------------------------------
+		Policies
+	-------------------------------*/
+
+	@#meta(description = "untrusted traffic must traverse at least one network security control")
+	policy untrusted_flows_guarded: path {
+
+		// IOs attached to untrusted nodes
+		let from = ?( //io[@security.level = untrusted] )
+
+		// any IO
+		let to   = ?( //io )
+
+		@#meta(description = "no path from untrusted IO to any IO may lack a network guard")
+		assert ?(
+			not(
+				exists(
+					path(from, to)[ not @security.control.network.guard ]
+				)
+			)
+		)
+	}
+
+	@#meta(description = "if SDLC fetches packages from the internet, code must be scanned somewhere")
+	policy internet_packages_scanned {
+
+		// any pipe from an IO called `packages` to an IO called `egress`
+		// (e.g. sdlc/packages -> internet/egress)
+		let internet_package_flows = ?(
+			//pipe[
+				from.ref = "packages"
+				and to.ref = "egress"
+			]
+		)
+
+		// any node annotated with an SDLC control guard
+		let sdlc_scanners = ?(
+			//*[@security.control.sdlc.guard]
+		)
+
+		@#meta(description = "cannot use internet packages without at least one SDLC scanner")
+		assert ?(
+			not(
+				internet_package_flows
+				and not sdlc_scanners
+			)
+		)
+	}
+}
+
+namespace operations {
+	@#meta/constraint(io_direction = in)
+	type plane: enum {data, control, management}
+}
+
+namespace network {
+	@#_internal/native(rust = "Ipv4Addr", parser = "ipv4")
+	type ipv4_address: u8[4]
+
+	@#_internal/native(rust = "Ipv6Addr", parser = "ipv6")
+	type ipv6_address: u8[16]
+
+	namespace ports {
+		type port: u16
+
+		struct port_range {
+			field from: port
+			field to: port
+		}
+	}
+
+	namespace icmp {
+		type type: u8
+		type code: u8
+
+		struct icmp_header {
+			field type: ../type
+			field code: ../code
+		}
+	}
+
+	// masked address forms for SG rules, etc.
+	struct ipv4_masked {
+		field address: ipv4_address
+		field mask:    number
+	}
+
+	struct ipv6_masked {
+		field address: ipv6_address
+		field mask:    number
+	}
+
+	namespace tcp {}
+
+	namespace udp {}
+
+	namespace dns {
+		@#meta(description = "DNS host name (e.g. example.com)")
+		@#meta/constraint(regex = "^[A-Za-z0-9.-]+$")
+		type name: text
+	}
+
+	type protocol: enum {http, https, other(text)}
+}
+
+namespace vendor {
+	!include vendor/aws.wa2
+}

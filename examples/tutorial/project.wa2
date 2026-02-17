@@ -18,12 +18,12 @@ new DataBucketLogs: vendor/aws/s3/bucket {
 	sensitivity = Private
 	
 	criticality = NonCritical
-	// protection missing → policy violation
+	// recoverability missing → policy violation
 }
 
 @#source/cfn(name: "DataBucket", line: 5)
 new DataBucket: vendor/aws/s3/bucket {
 	sensitivity = Sensitive
 	criticality = BusinessCritical
-	// protection missing → policy violation
+	// recoverability missing → policy violation
 }

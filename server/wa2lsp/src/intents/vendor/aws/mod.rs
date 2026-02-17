@@ -51,7 +51,7 @@ impl VendorProjector for AwsCfnProjector {
 /// Project a parsed CFN template into a Model
 pub fn project_template(template: &CfnTemplate) -> Result<Model, Vec<Diagnostic>> {
 	let mut model = Model::bootstrap();
-	model.ensure_entity("aws");
+	cfn_projector::ensure_aws_types(&mut model).map_err(model_error_to_diags)?;
 	cfn_projector::ensure_cfn_types(&mut model).map_err(model_error_to_diags)?;
 
 	let root = model.ensure_entity("deployment");
@@ -76,38 +76,40 @@ pub fn project_template(template: &CfnTemplate) -> Result<Model, Vec<Diagnostic>
 	cfn_projector::project_pseudo_parameters(&mut model, template_entity)
 		.map_err(model_error_to_diags)?;
 
-	let mut entities = Vec::new();
+   let entities = cfn_projector::project_resources(&mut model, template_entity, root, &template.resources)
+		.map_err(model_error_to_diags)?;
+   
+	//let mut entities = Vec::new();
+	// for resource in template.resources.values() {
+	// 	let entity = model.ensure_entity(&resource.logical_id);
+	// 	model
+	// 		.apply_to(
+	// 			entity,
+	// 			"aws:type",
+	// 			&format!("\"{}\"", resource.resource_type),
+	// 		)
+	// 		.map_err(model_error_to_diags)?;
+	// 	model
+	// 		.apply_to(
+	// 			entity,
+	// 			"aws:logicalId",
+	// 			&format!("\"{}\"", resource.logical_id),
+	// 		)
+	// 		.map_err(model_error_to_diags)?;
+	// 	model
+	// 		.apply_entity(root, "wa2:contains", entity)
+	// 		.map_err(model_error_to_diags)?;
 
-	for resource in template.resources.values() {
-		let entity = model.ensure_entity(&resource.logical_id);
-		model
-			.apply_to(
-				entity,
-				"aws:type",
-				&format!("\"{}\"", resource.resource_type),
-			)
-			.map_err(model_error_to_diags)?;
-		model
-			.apply_to(
-				entity,
-				"aws:logicalId",
-				&format!("\"{}\"", resource.logical_id),
-			)
-			.map_err(model_error_to_diags)?;
-		model
-			.apply_entity(root, "wa2:contains", entity)
-			.map_err(model_error_to_diags)?;
+	// 	// Track source location
+	// 	model.set_range(entity, resource.logical_id_range);
 
-		// Track source location
-		model.set_range(entity, resource.logical_id_range);
+	// 	for (prop_name, (prop_value, _)) in &resource.properties {
+	// 		cfn_projector::project_value(&mut model, entity, prop_name, prop_value)
+	// 			.map_err(model_error_to_diags)?;
+	// 	}
 
-		for (prop_name, (prop_value, _)) in &resource.properties {
-			cfn_projector::project_value(&mut model, entity, prop_name, prop_value)
-				.map_err(model_error_to_diags)?;
-		}
-
-		entities.push(entity);
-	}
+	// 	entities.push(entity);
+	// }
 
 	// Derive phase - AWS-specific type classification and evidence
 	for entity in entities {
