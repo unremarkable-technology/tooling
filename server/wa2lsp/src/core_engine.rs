@@ -5,12 +5,13 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::{
+	iaac::cloudformation::{cfn_ir::types::CfnTemplate, spec_store::SpecStore},
 	intents::{
-		guidance::{GuideLevel, guidance},
+		guidance::GuideLevel,
+		kernel::Kernel,
 		model::Model,
 		vendor::{DocumentFormat, Method, Vendor, get_projector},
 	},
-   iaac::cloudformation::{cfn_ir::types::CfnTemplate, spec_store::SpecStore},
 };
 
 /// per-document state held by the core engine
@@ -25,6 +26,7 @@ struct DocumentState {
 pub struct CoreEngine {
 	docs: HashMap<Url, DocumentState>,
 	spec: Option<Arc<SpecStore>>,
+	kernel: Kernel,
 }
 
 impl Default for CoreEngine {
@@ -38,6 +40,7 @@ impl CoreEngine {
 		Self {
 			docs: HashMap::new(),
 			spec: None,
+         kernel: Kernel::new(),
 		}
 	}
 
@@ -156,20 +159,24 @@ impl CoreEngine {
 			None => return vec![],
 		};
 
-		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-
-		let model = match projector.project(&doc.text, uri, doc.format) {
-			Ok(result) => result.model,
+		// Use Kernel for analysis
+		let result = match self.kernel.analyse(
+			&doc.text,
+			uri,
+			doc.format,
+			Vendor::Aws,
+			Method::CloudFormation,
+		) {
+			Ok(r) => r,
 			Err(diags) => return diags,
 		};
 
-		let guides = guidance(&model);
-
-		let diagnostics: Vec<Diagnostic> = guides
+		let diagnostics: Vec<Diagnostic> = result
+		   .guides
 			.into_iter()
 			.filter_map(|guide| {
 				// We need the template to get ranges - but we can get them from the model now
-				let range = model.get_range(guide.entity)?;
+				let range = result.model.get_range(guide.entity)?;
 
 				let severity = match guide.level {
 					GuideLevel::Required => DiagnosticSeverity::ERROR,
@@ -198,7 +205,7 @@ impl CoreEngine {
 		// Cache both diagnostics and model
 		if let Some(doc_state) = self.docs.get_mut(uri) {
 			doc_state.cached_diagnostics = diagnostics.clone();
-			doc_state.cached_model = Some(model);
+			doc_state.cached_model = Some(result.model);
 		}
 
 		diagnostics

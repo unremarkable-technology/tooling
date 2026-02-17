@@ -228,8 +228,7 @@ pub struct Statement {
 }
 
 // ─── Well-known entities ───
-// Bootstrap entities have fixed IDs
-pub const NAMESPACE: EntityId = EntityId(0); // wa2 namespace itself
+pub const NAMESPACE: EntityId = EntityId(0); // wa2
 pub const TYPE: EntityId = EntityId(1); // wa2:Type
 pub const NAMESPACE_TYPE: EntityId = EntityId(2); // wa2:Namespace
 pub const PREDICATE: EntityId = EntityId(3); // wa2:Predicate
@@ -237,7 +236,10 @@ pub const TYPE_PRED: EntityId = EntityId(4); // wa2:type
 pub const NAMESPACE_PRED: EntityId = EntityId(5); // wa2:namespace
 pub const CARDINALITY: EntityId = EntityId(6); // wa2:cardinality
 pub const CONTAINS: EntityId = EntityId(7); // wa2:contains
-pub const BOOTSTRAP_COUNT: u32 = 8;
+pub const DOMAIN: EntityId = EntityId(8); // wa2:domain
+pub const RANGE: EntityId = EntityId(9); // wa2:range
+pub const SUB_TYPE_OF: EntityId = EntityId(10); // wa2:subTypeOf
+pub const BOOTSTRAP_COUNT: u32 = 11;
 
 // ─── Model ───
 
@@ -295,6 +297,9 @@ impl Model {
 		model.add_entity_raw(Some("namespace"), Some(NAMESPACE)); // 5: wa2:namespace
 		model.add_entity_raw(Some("cardinality"), Some(NAMESPACE)); // 6: wa2:cardinality
 		model.add_entity_raw(Some("contains"), Some(NAMESPACE)); // 7: wa2:contains
+		model.add_entity_raw(Some("domain"), Some(NAMESPACE)); // 8: wa2:domain
+		model.add_entity_raw(Some("range"), Some(NAMESPACE)); // 9: wa2:range
+		model.add_entity_raw(Some("subTypeOf"), Some(NAMESPACE)); // 10: wa2:subTypeOf
 
 		// Type statements for bootstrap entities
 		model.add_statement_raw(NAMESPACE, TYPE_PRED, Value::Entity(NAMESPACE_TYPE));
@@ -305,7 +310,10 @@ impl Model {
 		model.add_statement_raw(NAMESPACE_PRED, TYPE_PRED, Value::Entity(PREDICATE));
 		model.add_statement_raw(CARDINALITY, TYPE_PRED, Value::Entity(PREDICATE));
 		model.add_statement_raw(CONTAINS, TYPE_PRED, Value::Entity(PREDICATE));
-
+		model.add_statement_raw(DOMAIN, TYPE_PRED, Value::Entity(PREDICATE));
+		model.add_statement_raw(RANGE, TYPE_PRED, Value::Entity(PREDICATE));
+		model.add_statement_raw(SUB_TYPE_OF, TYPE_PRED, Value::Entity(PREDICATE));
+      
 		// Cardinality constraints
 		model.add_statement_raw(TYPE_PRED, CARDINALITY, Value::Number(1));
 		model.add_statement_raw(NAMESPACE_PRED, CARDINALITY, Value::Number(1));

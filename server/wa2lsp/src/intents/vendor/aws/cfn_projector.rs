@@ -3,8 +3,10 @@
 use indexmap::IndexMap;
 use tower_lsp::lsp_types::{Position, Range};
 
+use crate::iaac::cloudformation::cfn_ir::types::{
+	CFN_INTRINSICS, CfnOutput, CfnParameter, CfnResource, CfnValue,
+};
 use crate::intents::model::{EntityId, Model, ModelError};
-use crate::iaac::cloudformation::cfn_ir::types::{CFN_INTRINSICS, CfnOutput, CfnParameter, CfnResource, CfnValue};
 
 /// Extract Sub template variables with their positions within the template string
 /// Returns Vec<(variable_name, start_offset, end_offset)> where offsets are byte positions
@@ -54,17 +56,30 @@ const CFN_PREDICATES: &[&str] = &[
 pub fn ensure_core_types(model: &mut Model) -> Result<(), ModelError> {
 	model.ensure_entity("core");
 
-	// Types
-   model.apply("core:Workload", "wa2:type", "wa2:Type")?;
+	// DSL: enum Node { Run, Store, Move }
 	model.apply("core:Node", "wa2:type", "wa2:Type")?;
 	model.apply("core:Store", "wa2:type", "wa2:Type")?;
+	model.apply("core:Store", "wa2:subTypeOf", "core:Node")?;
 	model.apply("core:Run", "wa2:type", "wa2:Type")?;
+	model.apply("core:Run", "wa2:subTypeOf", "core:Node")?;
 	model.apply("core:Move", "wa2:type", "wa2:Type")?;
+	model.apply("core:Move", "wa2:subTypeOf", "core:Node")?;
+
+	// DSL: struct Workload { nodes: Node[] }
+	model.apply("core:Workload", "wa2:type", "wa2:Type")?;
+	model.apply("core:nodes", "wa2:type", "wa2:Predicate")?;
+	model.apply("core:nodes", "wa2:domain", "core:Workload")?;
+	model.apply("core:nodes", "wa2:range", "core:Node")?;
+
+	// DSL: struct Evidence { value: String }
 	model.apply("core:Evidence", "wa2:type", "wa2:Type")?;
+	model.apply("core:value", "wa2:type", "wa2:Predicate")?;
+	model.apply("core:value", "wa2:domain", "core:Evidence")?;
 
 	// Predicates
 	model.apply("core:source", "wa2:type", "wa2:Predicate")?;
-	model.apply("core:value", "wa2:type", "wa2:Predicate")?;
+	model.apply("core:source", "wa2:domain", "core:Node")?;
+	model.apply("core:source", "wa2:range", "cfn:Resource")?;
 
 	Ok(())
 }

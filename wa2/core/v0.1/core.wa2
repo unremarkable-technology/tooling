@@ -1,67 +1,28 @@
 #!/usr/bin/env wa2
 !version 0.1
 
-// we need to tell the system how to map information we might use
-// for example in constraints we want to limit to decl with "in" io directions
-namespace _internal {
-	@#meta(description = "supported nodes")
-	type link_annotation: present
+// in rust we would say
+//model.apply("core:Workload", "wa2:type", "wa2:Type")?;
 
-	@#meta(description = "supported nodes")
-	type node_types: enum {run, store, move, engine}
+// in our dsl short form
+//+(core:Workload, wa2:type, wa2:Type)
 
-	@#meta(description = "xyz in a node")
-	type node_decl_types: enum {io, node, pipe}
+// and in our full dsl we can say
+//struct Workload {
+//}
 
-	@#meta(description = "types of nodes")
-	type decl_io_directions: enum {in, out}
-
-	namespace native {
-		type rust: text
-		type parser: text
-	}
-
-	// reserved for implementation mapping to token ids
-	type token: enum {field, io, pipe}
+enum Node {
+	run,
+	store,
+	move,
 }
 
-namespace data {
-	// how sensitive the data is (confidentiality)
-	type sensitivity: enum {
-		Public,
-		Proprietary,
-		Private,
-		Confidential,
-		Sensitive
-	}
+struct Workload {
+	field nodes: Node[]
+}
 
-	// how bad it is to lose the data (availability / impact)
-	type criticality: enum {
-		Disposable         // safe to lose
-		NonCritical,       // inconvenience only
-		Important,         // painful but survivable
-		BusinessCritical,  // major financial or operational impact
-		MissionCritical,   // existential / legal / safety impact
-	}
-
-	// how well can we recover data
-	type protection: enum {
-		None,         		// loss likely
-		Backup,        		// loss limited to gap in point-in-time copies
-		Replication,   		// loss limited to replication latency
-		Synchronous,   		// no loss under normal failure scenarios
-	}
-
-	// how close are two nodes
-	type proximity: enum {
-		CoLocated,			// same rack
-		Local,				// same facility, <1km
-		Campus,				// same site, <5km
-		Metro,				// <50km
-		Regional,			// 100-500km
-		CrossRegion,		// >500km, same continent
-		Intercontinental,	// different continent
-	}
+struct Evidence {
+	field value: String
 }
 
 namespace vendor {

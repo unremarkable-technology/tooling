@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_variables)]
 
-pub mod vendor;
-pub mod model;
 pub mod guidance;
+pub mod kernel;
+pub mod model;
+pub mod vendor;

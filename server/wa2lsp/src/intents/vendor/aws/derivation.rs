@@ -19,9 +19,9 @@ pub fn derive_wa2_type(
 		_ => None,
 	};
 
-	if let Some(kind) = node_type {
+	if let Some(as_type) = node_type {
 		let node = model.blank();
-		model.apply_to(node, "wa2:type", kind)?;
+		model.apply_to(node, "wa2:type", as_type)?;
 		model.apply_entity(node, "core:source", cfn_entity)?;
 
 		if let Some(range) = model.get_range(cfn_entity) {
