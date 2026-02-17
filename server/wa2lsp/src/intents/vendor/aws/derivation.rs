@@ -6,20 +6,20 @@ use crate::intents::model::{Axis, Cmp, EntityId, Model, ModelError, Query, Value
 pub fn derive_wa2_type(
 	model: &mut Model,
 	cfn_entity: EntityId,
-	template: EntityId,
+	workload: EntityId,
 ) -> Result<(), ModelError> {
 	let Some(aws_type) = model.get_literal(cfn_entity, "aws:type") else {
 		return Ok(());
 	};
 
-	let core_kind = match aws_type.as_str() {
+	let node_type = match aws_type.as_str() {
 		"AWS::EC2::Instance" | "AWS::Lambda::Function" => Some("core:Run"),
 		"AWS::S3::Bucket" | "AWS::EC2::Volume" | "AWS::EFS::FileSystem" => Some("core:Store"),
 		"AWS::SQS::Queue" | "AWS::Kinesis::Stream" => Some("core:Move"),
 		_ => None,
 	};
 
-	if let Some(kind) = core_kind {
+	if let Some(kind) = node_type {
 		let node = model.blank();
 		model.apply_to(node, "wa2:type", kind)?;
 		model.apply_entity(node, "core:source", cfn_entity)?;
@@ -28,8 +28,8 @@ pub fn derive_wa2_type(
 			model.set_range(node, range);
 		}
 
-		// Add node to template
-		model.apply_entity(template, "wa2:contains", node)?;
+		// Add node to workload
+		model.apply_entity(workload, "wa2:contains", node)?;
 	}
 
 	Ok(())

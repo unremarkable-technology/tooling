@@ -55,6 +55,7 @@ pub fn ensure_core_types(model: &mut Model) -> Result<(), ModelError> {
 	model.ensure_entity("core");
 
 	// Types
+   model.apply("core:Workload", "wa2:type", "wa2:Type")?;
 	model.apply("core:Node", "wa2:type", "wa2:Type")?;
 	model.apply("core:Store", "wa2:type", "wa2:Type")?;
 	model.apply("core:Run", "wa2:type", "wa2:Type")?;

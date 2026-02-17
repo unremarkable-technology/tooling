@@ -25,6 +25,45 @@ namespace _internal {
 	type token: enum {field, io, pipe}
 }
 
+namespace data {
+	// how sensitive the data is (confidentiality)
+	type sensitivity: enum {
+		Public,
+		Proprietary,
+		Private,
+		Confidential,
+		Sensitive
+	}
+
+	// how bad it is to lose the data (availability / impact)
+	type criticality: enum {
+		Disposable         // safe to lose
+		NonCritical,       // inconvenience only
+		Important,         // painful but survivable
+		BusinessCritical,  // major financial or operational impact
+		MissionCritical,   // existential / legal / safety impact
+	}
+
+	// how well can we recover data
+	type protection: enum {
+		None,         		// loss likely
+		Backup,        		// loss limited to gap in point-in-time copies
+		Replication,   		// loss limited to replication latency
+		Synchronous,   		// no loss under normal failure scenarios
+	}
+
+	// how close are two nodes
+	type proximity: enum {
+		CoLocated,			// same rack
+		Local,				// same facility, <1km
+		Campus,				// same site, <5km
+		Metro,				// <50km
+		Regional,			// 100-500km
+		CrossRegion,		// >500km, same continent
+		Intercontinental,	// different continent
+	}
+}
+
 namespace vendor {
 	!include vendor/aws.wa2
 }

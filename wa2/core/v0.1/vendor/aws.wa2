@@ -1,51 +1,42 @@
 #!/usr/bin/env wa2
 !version 0.1
 
-// how do we map user defined tags into our structure?
-map aws_tags_to_wa2 {
-   let cfn_tags = ?(
-		aws:*//Tags/*
+// Derive core:Store nodes from AWS storage resources
+map aws_stores_to_core {
+	// Query all cfn:Resource nodes that are storage types
+	let cfn_stores = ?(
+		//cfn:Resource[
+			aws:type in (
+					"AWS::EC2::Volume",
+					"AWS::EFS::FileSystem",
+					"AWS::S3::Bucket",
+			)
+		]
 	)
 
-   let criticality_tags = ?(cfn_tags[@Key = "DataCriticality"])
-
-	match criticality *(
-	   criticality_tags,
-	   aws:Value ~(
-         "important" => /wa2:data/wa2:criticality/business,
-         "medium" => /wa2:data/wa2:criticality/xyz,
-         "low" => /wa2:data/wa2:criticality/blah,
-      )
-   )
-
-   +(criticality[0], /wa2:data/wa2:criticality, criticality[2])
-}
-
-// maps from aws specific service types into wa2:type (wa2:store, wa2:run, wa2:move)
-map aws_resources_to_wa2 {
-   let aws_stores = ?(
-      //aws:resource[
-         aws:type in (
-            "AWS::EC2::Volume",
-            "AWS::EFS::FileSystem",
-            "AWS::S3::Bucket",
-         )
-      ]
-   )
-
-   +(aws_stores, wa2:type, wa2:store)
+	// For each cfn store, create a corresponding core:Store node
+	*(cfn_store in cfn_stores, {
+		// Create new blank node with type core:Store
+		let store_node = +(_, wa2:type, core:Store)
+		
+		// Link back to the source cfn:Resource
+		+(store_node, core:source, cfn_store)
+		
+		// Add to workload's containment hierarchy
+		+(core:workload, wa2:contains, store_node)
+	})
 }
 
 // why "data" and not "store"?
 
 /* verb (map, policy, evidence) probably wrong, and maybe map is same as evidence anyway?
-   ordering does not matter, we eval all until a loop add no more predicates
+	ordering does not matter, we eval all until a loop add no more predicates
  * map aws data storage resources into wa2:store
-      aws:*[aws:type in (AWS::S3::Bucket, AWS::EC2::Volume)]
+		aws:*[aws:type in (AWS::S3::Bucket, AWS::EC2::Volume)]
  * policy all wa2:store in aws must have data tags
-      wa2:store[ EXISTS(aws:tags[ aws:key ALL (criticality, sensitivity) ]) ]
+		wa2:store[ EXISTS(aws:tags[ aws:key ALL (criticality, sensitivity) ]) ]
  * evidence wa2:store in aws with data recoverability levels
-      aws:*[aws:type in (AWS::S3::Bucket, AWS::EC2::Volume)]
+		aws:*[aws:type in (AWS::S3::Bucket, AWS::EC2::Volume)]
  * policy all wa2:store in aws have data recorverability evidence
-      wa2:store[aws:*] with data:recoverability
+		wa2:store[aws:*] with data:recoverability
 */

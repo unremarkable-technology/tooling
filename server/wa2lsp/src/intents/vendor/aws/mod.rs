@@ -60,9 +60,20 @@ pub fn project_template(template: &CfnTemplate) -> Result<Model, Vec<Diagnostic>
 	model
 		.apply_to(template_entity, "wa2:type", "cfn:Template")
 		.map_err(model_error_to_diags)?;
-	model.set_root(template_entity);
+
+	// Create workload linked to template, set as root
+	let workload = model.ensure_entity("core:workload");
+	model
+		.apply_to(workload, "wa2:type", "core:Workload")
+		.map_err(model_error_to_diags)?;
+	model
+		.apply_entity(workload, "core:source", template_entity)
+		.map_err(model_error_to_diags)?;
+	model.set_root(workload);
 
 	// Project template sections
+	cfn_projector::project_outputs(&mut model, template_entity, &template.outputs)
+		.map_err(model_error_to_diags)?;
 	cfn_projector::project_parameters(&mut model, template_entity, &template.parameters)
 		.map_err(model_error_to_diags)?;
 	cfn_projector::project_pseudo_parameters(&mut model, template_entity)
@@ -72,13 +83,9 @@ pub fn project_template(template: &CfnTemplate) -> Result<Model, Vec<Diagnostic>
 		cfn_projector::project_resources(&mut model, template_entity, &template.resources)
 			.map_err(model_error_to_diags)?;
 
-   cfn_projector::project_outputs(&mut model, template_entity, &template.outputs)
-		.map_err(model_error_to_diags)?;
-
-	// Derive phase - creates core:Nodes attached to template
+	// Derive phase - creates core:Nodes attached to workload
 	for entity in entities {
-		derivation::derive_wa2_type(&mut model, entity, template_entity)
-			.map_err(model_error_to_diags)?;
+		derivation::derive_wa2_type(&mut model, entity, workload).map_err(model_error_to_diags)?;
 		derivation::derive_evidence(&mut model, entity).map_err(model_error_to_diags)?;
 	}
 
