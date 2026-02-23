@@ -74,52 +74,6 @@ pub fn project_template_into(model: &mut Model, template: &CfnTemplate) -> Resul
 	Ok(())
 }
 
-/// Project a parsed CFN template into a Model
-// pub fn project_template(template: &CfnTemplate) -> Result<Model, Vec<Diagnostic>> {
-// 	let mut model = Model::bootstrap();
-// 	cfn_projector::ensure_core_types(&mut model).map_err(model_error_to_diags)?;
-// 	cfn_projector::ensure_aws_types(&mut model).map_err(model_error_to_diags)?;
-// 	cfn_projector::ensure_cfn_types(&mut model).map_err(model_error_to_diags)?;
-
-// 	// Create template entity as root
-// 	let template_entity = model.blank();
-// 	model
-// 		.apply_to(template_entity, "wa2:type", "cfn:Template")
-// 		.map_err(model_error_to_diags)?;
-
-// 	// Create workload linked to template, set as root
-// 	let workload = model
-// 		.ensure_entity("core:workload")
-// 		.map_err(model_error_to_diags)?;
-// 	model
-// 		.apply_to(workload, "wa2:type", "core:Workload")
-// 		.map_err(model_error_to_diags)?;
-// 	model
-// 		.apply_entity(workload, "core:source", template_entity)
-// 		.map_err(model_error_to_diags)?;
-// 	model.set_root(workload);
-
-// 	// Project template sections
-// 	cfn_projector::project_outputs(&mut model, template_entity, &template.outputs)
-// 		.map_err(model_error_to_diags)?;
-// 	cfn_projector::project_parameters(&mut model, template_entity, &template.parameters)
-// 		.map_err(model_error_to_diags)?;
-// 	cfn_projector::project_pseudo_parameters(&mut model, template_entity)
-// 		.map_err(model_error_to_diags)?;
-
-// 	let entities =
-// 		cfn_projector::project_resources(&mut model, template_entity, &template.resources)
-// 			.map_err(model_error_to_diags)?;
-
-// 	// Derive phase - creates core:Nodes attached to workload
-// 	for entity in entities {
-// 		derivation::derive_wa2_type(&mut model, entity, workload).map_err(model_error_to_diags)?;
-// 		derivation::derive_evidence(&mut model, entity).map_err(model_error_to_diags)?;
-// 	}
-
-// 	Ok(model)
-// }
-
 fn model_error_to_diags(err: crate::intents::model::ModelError) -> Vec<Diagnostic> {
 	vec![Diagnostic {
 		range: tower_lsp::lsp_types::Range::default(),

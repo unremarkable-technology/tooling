@@ -12,19 +12,78 @@ impl QueryEngine {
 	}
 
 	pub fn execute(&self, model: &Model, path: &QueryPath) -> Result<Vec<EntityId>, RuleError> {
-		// Start from root
-		let root = match model.root() {
-			Some(r) => r,
-			None => return Ok(Vec::new()),
+		if path.steps.is_empty() {
+			return Ok(Vec::new());
+		}
+
+		let first_step = &path.steps[0];
+
+		// First step with Descendant axis = global scan
+		let mut current = if matches!(first_step.axis, Axis::Descendant | Axis::DescendantOrSelf) {
+			// All entities as candidates
+			let all: Vec<EntityId> = (0..model.entity_count())
+				.map(|i| EntityId(i as u32))
+				.collect();
+			// Apply type/predicate filters from first step
+			self.apply_filters(model, all, first_step)?
+		} else {
+			let root = match model.root() {
+				Some(r) => vec![r],
+				None => return Ok(Vec::new()),
+			};
+			self.execute_step(model, &root, first_step)?
 		};
 
-		let mut current = vec![root];
-
-		for step in &path.steps {
+		// Remaining steps
+		for step in &path.steps[1..] {
 			current = self.execute_step(model, &current, step)?;
 		}
 
 		Ok(current)
+	}
+
+	fn apply_filters(
+		&self,
+		model: &Model,
+		candidates: Vec<EntityId>,
+		step: &QueryStep,
+	) -> Result<Vec<EntityId>, RuleError> {
+		let mut results = Vec::new();
+
+		for candidate in candidates {
+			// Node test (type or name)
+			if let Some(ref type_name) = step.node_test {
+				let qname = type_name.to_string();
+				if let Some(resolved) = model.resolve(&qname) {
+					// Check if resolved is a type (has wa2:type = wa2:Type)
+					let wa2_type = model.resolve("wa2:Type");
+					if wa2_type.map_or(false, |t| model.has_type(resolved, t)) {
+						// It's a type - filter by type
+						if !model.has_type(candidate, resolved) {
+							continue;
+						}
+					} else {
+						// It's a name - exact match
+						if candidate != resolved {
+							continue;
+						}
+					}
+				} else {
+					continue; // Can't resolve, skip
+				}
+			}
+
+			// Predicates
+			if !self.check_predicates(model, candidate, &step.predicates)? {
+				continue;
+			}
+
+			if !results.contains(&candidate) {
+				results.push(candidate);
+			}
+		}
+
+		Ok(results)
 	}
 
 	fn execute_step(

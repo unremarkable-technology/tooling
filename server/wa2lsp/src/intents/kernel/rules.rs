@@ -1,6 +1,6 @@
 //! Rule execution engine with fixed-point iteration
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::intents::kernel::ast::*;
 use crate::intents::kernel::query::QueryEngine;
@@ -11,8 +11,13 @@ pub struct RuleError {
 	pub message: String,
 }
 
+/// Reference binding: map of loop variable names to entity values
+type ReferenceBinding = Vec<(String, EntityId)>;
+
 pub struct RuleEngine {
 	max_iterations: usize,
+	/// Tracks (rule_name, reference_binding) combinations already processed
+	processed: HashSet<(String, ReferenceBinding)>,
 }
 
 impl Default for RuleEngine {
@@ -25,12 +30,16 @@ impl RuleEngine {
 	pub fn new() -> Self {
 		Self {
 			max_iterations: 100,
+			processed: HashSet::new(),
 		}
 	}
 
 	/// Run rules to fixed-point
 	pub fn run(&mut self, model: &mut Model, rules: &[Rule]) -> Result<(), RuleError> {
-		for iteration in 0..self.max_iterations {
+		// Clear processed set for fresh run
+		self.processed.clear();
+
+		for _ in 0..self.max_iterations {
 			let initial_count = model.statement_count();
 
 			for rule in rules {
@@ -39,7 +48,6 @@ impl RuleEngine {
 
 			let final_count = model.statement_count();
 			if final_count == initial_count {
-				// Fixed point reached
 				return Ok(());
 			}
 		}
@@ -52,32 +60,43 @@ impl RuleEngine {
 		})
 	}
 
-	fn execute_rule(&self, model: &mut Model, rule: &Rule) -> Result<(), RuleError> {
+	fn execute_rule(&mut self, model: &mut Model, rule: &Rule) -> Result<(), RuleError> {
 		let mut env = Env::new();
-		self.execute_statements(model, &rule.body, &mut env)
+		let binding = Vec::new();
+		self.execute_statements(model, &rule.body, &mut env, &rule.name, &binding)
 	}
 
 	fn execute_statements(
-		&self,
+		&mut self,
 		model: &mut Model,
 		stmts: &[Statement],
 		env: &mut Env,
+		rule_name: &str,
+		reference_binding: &ReferenceBinding,
 	) -> Result<(), RuleError> {
 		for stmt in stmts {
-			self.execute_statement(model, stmt, env)?;
+			self.execute_statement(model, stmt, env, rule_name, reference_binding)?;
 		}
 		Ok(())
 	}
 
 	fn execute_statement(
-		&self,
+		&mut self,
 		model: &mut Model,
 		stmt: &Statement,
 		env: &mut Env,
+		rule_name: &str,
+		reference_binding: &ReferenceBinding,
 	) -> Result<(), RuleError> {
 		match stmt {
 			Statement::Let(let_stmt) => {
-				let value = self.eval_expr(model, &let_stmt.value, env)?;
+				let value = match &let_stmt.value {
+					Expr::Add(_) => {
+						let entity = self.eval_expr_to_entity(model, &let_stmt.value, env)?;
+						EvalResult::Entity(entity)
+					}
+					_ => self.eval_expr(model, &let_stmt.value, env)?,
+				};
 				env.bind(let_stmt.name.clone(), value);
 			}
 
@@ -106,9 +125,7 @@ impl RuleEngine {
 							message: "cannot use set as object in add statement".to_string(),
 						});
 					}
-					EvalResult::Empty => {
-						// Adding empty does nothing
-					}
+					EvalResult::Empty => {}
 				}
 			}
 
@@ -121,24 +138,39 @@ impl RuleEngine {
 				};
 
 				for entity in entities {
+					// Build new reference binding
+					let mut new_binding = reference_binding.clone();
+					new_binding.push((iter_stmt.var.clone(), entity));
+
+					// Check if already processed
+					let key = (rule_name.to_string(), new_binding.clone());
+					if self.processed.contains(&key) {
+						continue;
+					}
+					self.processed.insert(key);
+
+					// Execute body
 					let mut inner_env = env.clone();
 					inner_env.bind(iter_stmt.var.clone(), EvalResult::Entity(entity));
-					self.execute_statements(model, &iter_stmt.body, &mut inner_env)?;
+					self.execute_statements(
+						model,
+						&iter_stmt.body,
+						&mut inner_env,
+						rule_name,
+						&new_binding,
+					)?;
 				}
 			}
 
 			Statement::Assert(assert_stmt) => {
 				let value = self.eval_expr(model, &assert_stmt.expr, env)?;
 				if value.is_empty() {
-					// Create assertion failure
-					// TODO: attach to current context
 					let failure = model.blank();
 					model
 						.apply_to(failure, "wa2:type", "core:AssertFailure")
 						.map_err(|e| RuleError {
 							message: format!("assert failure creation failed: {:?}", e),
 						})?;
-					// Store assertion name from expr if it's a var
 					if let Expr::Var(name, _) = &assert_stmt.expr {
 						model
 							.apply_to(failure, "core:assertion", &format!("\"{}\"", name))
@@ -295,7 +327,7 @@ impl Env {
 
 	pub fn get(&self, name: &str) -> Result<EvalResult, RuleError> {
 		self.bindings.get(name).cloned().ok_or_else(|| RuleError {
-			message: format!("undefined variable: {}", name),
+			message: format!("unbound variable: {}", name),
 		})
 	}
 }

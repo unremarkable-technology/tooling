@@ -141,3 +141,92 @@ impl Kernel {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::intents::kernel::lexer::Wa2Source;
+	use crate::intents::kernel::lower::Lower;
+	use crate::intents::kernel::parser::parse;
+	use crate::intents::model::Model;
+
+	#[test]
+	fn test_derive_stores_rule() {
+		// 1. Bootstrap and load DSL
+		let bootstrap_src = include_str!("../../../../../wa2/core/v0.1/bootstrap.wa2");
+		let source = Wa2Source::from_str(bootstrap_src);
+		let ast = parse(source.lexer()).expect("parse bootstrap.wa2");
+
+		let mut model = Model::bootstrap();
+		let mut lower = Lower::new(&mut model, "core").expect("create lowerer");
+		let rules = lower.lower(&ast).expect("lower bootstrap.wa2");
+
+		eprintln!("Loaded {} rules", rules.len());
+		for rule in &rules {
+			eprintln!("  - {}", rule.name);
+		}
+
+		// 2. Manually create CFN structure (simulating projector without derive phase)
+		model.ensure_namespace("cfn").unwrap();
+		model.ensure_namespace("aws").unwrap();
+
+		model.apply("cfn:Resource", "wa2:type", "wa2:Type").unwrap();
+		model.apply("cfn:Template", "wa2:type", "wa2:Type").unwrap();
+
+		let workload = model.ensure_entity("core:workload").unwrap();
+		model
+			.apply_to(workload, "wa2:type", "core:Workload")
+			.unwrap();
+		model.set_root(workload);
+
+		let template = model.blank();
+		model
+			.apply_to(template, "wa2:type", "cfn:Template")
+			.unwrap();
+		model
+			.apply_entity(workload, "core:source", template)
+			.unwrap();
+
+		let resources = model.blank();
+		model
+			.apply_entity(template, "cfn:resources", resources)
+			.unwrap();
+
+		let bucket = model.ensure_raw("MyBucket");
+		model.apply_to(bucket, "wa2:type", "cfn:Resource").unwrap();
+		model
+			.apply_to(bucket, "aws:type", "\"AWS::S3::Bucket\"")
+			.unwrap();
+		model
+			.apply_entity(resources, "wa2:contains", bucket)
+			.unwrap();
+
+		eprintln!("Before rules:\n{}", model);
+
+		// 3. Run rules
+		let mut engine = RuleEngine::new();
+		engine.run(&mut model, &rules).expect("run rules");
+
+		eprintln!("After rules:\n{}", model);
+
+		// 4. Verify core:Store was created
+		let store_type = model
+			.resolve("core:Store")
+			.expect("core:Store should exist");
+
+		// Find entities with type core:Store
+		let stores: Vec<_> = (0..model.entity_count())
+			.map(|i| crate::intents::model::EntityId(i as u32))
+			.filter(|&id| model.has_type(id, store_type))
+			.collect();
+
+		eprintln!("Found {} Store nodes", stores.len());
+		assert_eq!(stores.len(), 1, "Should have created one Store node");
+
+		// Verify it's attached to workload
+		let children = model.children(workload);
+		let store_in_children = children.iter().any(|&c| model.has_type(c, store_type));
+		assert!(store_in_children, "Store should be child of workload");
+      panic!();
+	}
+}

@@ -358,6 +358,6 @@ Resources:
 		let guides = guidance(&model);
 		eprintln!("Guidance:\n===\n{:?}", guides);
 		assert!(guides.is_empty(), "all good");
-		panic!();
+		//panic!();
 	}
 }
