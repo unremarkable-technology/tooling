@@ -1,0 +1,37 @@
+#!/usr/bin/env wa2
+!version 0.1
+
+!include core.wa2
+
+new data:Asset_recoverability {
+   intent_recorded = 
+}
+
+// checks all aws stores have intent for
+rule aws_store_intent {
+   // we want to check all AWS stores
+	let aws_stores = ?(//core:Store[*/aws:type])
+
+	// record intent for each store
+	*(store in aws_stores, {
+      // record an intent against store
+		let intent = +(_, wa2:type, core:Intent) // node to store intents
+		+(store, core:source, intent) // Link from store to intent
+
+		let critical = ?(store[
+         aws:Tags/aws:Key = "DataCriticality"
+      ])
+		let sensitive = ?(store[
+         aws:Tags/aws:Key = "DataSensitivity"
+      ])
+
+      // !assert_params if any param is empty: then record an assert failure
+      // empty evaluates to false if (set(len=0) || bool(false) || number(0) || string(len=0))
+
+		@#assert(critical)
+      +(intent, data:critical, empty(critical))
+
+		@#assert(sensitive)
+      +(intent, data:sensitive, empty(sensitive))
+	})
+}

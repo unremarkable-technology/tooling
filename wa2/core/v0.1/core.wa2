@@ -25,6 +25,31 @@ struct Evidence {
 	field value: String
 }
 
+
 namespace vendor {
 	!include vendor/aws.wa2
+}
+
+namespace data {
+   // https://chatgpt.com/c/696bb47b-a484-832d-8bcd-7054a32a6401
+   governance Asset_recoverability {
+      field intent_recorded: Control,
+      field requires_recoverability : Obligation,
+      field is_recoverable: Evidence,
+      field intent_satisfied: Control,
+      filed complete: Goverernance,
+   }
+}
+
+// this should look at stores
+// allow the user to decide what should be backed up (so aws/azure example of projection)
+// then check for evidence of backing up
+policy all_critical_stores_backed_up {
+	// Query all cfn:Resource nodes that are storage types
+	let cfn_stores = ?(
+		//wa2:store[
+			data:DataAssetIntent/IsCritical
+			)
+		]
+	)
 }

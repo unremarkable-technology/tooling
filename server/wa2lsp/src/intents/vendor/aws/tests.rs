@@ -10,12 +10,14 @@ mod tests {
 	use url::Url;
 
 	use crate::{
+		iaac::cloudformation::{
+			spec_cache::SpecCacheManager, spec_source::SpecSource, spec_store::SpecStore,
+		},
 		intents::{
 			guidance::{FocusTaxonomy, guidance, has_evidence},
-			model::{Query, print_model_as_tree},
+			model::{Model, Query, print_model_as_tree},
 			vendor::{DocumentFormat, Method, Vendor, get_projector},
 		},
-		iaac::cloudformation::{spec_cache::SpecCacheManager, spec_source::SpecSource, spec_store::SpecStore},
 	};
 
 	/// Loads the real CFN spec (blocking). Cached after first call.
@@ -60,11 +62,10 @@ Resources:
 "#;
 
 		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-		let model = projector
-			.project(&cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.ok()
-			.unwrap()
-			.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
 
 		//eprintln!("\nModel:\n===\n{}", &model);
 		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
@@ -91,11 +92,10 @@ Resources:
 "#;
 
 		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-		let model = projector
-			.project(&cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.ok()
-			.unwrap()
-			.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
 		//eprintln!("\nModel:\n===\n{}", &model);
 		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
 
@@ -132,11 +132,10 @@ Resources:
 "#;
 
 		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-		let model = projector
-			.project(&cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.ok()
-			.unwrap()
-			.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
 		//eprintln!("\nModel:\n===\n{}", &model);
 		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
 
@@ -170,11 +169,10 @@ Resources:
 "#;
 
 		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-		let model = projector
-			.project(&cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.ok()
-			.unwrap()
-			.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
 		//eprintln!("\nModel:\n===\n{}", &model);
 		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
 
@@ -216,11 +214,10 @@ Resources:
 "#;
 
 		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-		let model = projector
-			.project(&cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.ok()
-			.unwrap()
-			.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
 
 		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
 
@@ -263,11 +260,10 @@ Resources:
 "#;
 
 		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-		let model = projector
-			.project(&cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.ok()
-			.unwrap()
-			.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
 		//eprintln!("\nModel:\n===\n{}", &model);
 
 		// GUIDANCE: is guidance required?
@@ -285,11 +281,10 @@ Resources:
 		let path = Path::new("../../examples/tutorial/0.naive.yaml");
 		let cfn_text = std::fs::read_to_string(path).unwrap();
 		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-		let model = projector
-			.project(&cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.ok()
-			.unwrap()
-			.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
 
 		//eprintln!("\nModel:\n===\n{}", &model);
 		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
@@ -308,11 +303,10 @@ Resources:
 		let path = Path::new("../../examples/tutorial/1.calm.yaml");
 		let cfn_text = std::fs::read_to_string(path).unwrap();
 		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-		let model = projector
-			.project(&cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.ok()
-			.unwrap()
-			.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
 
 		//eprintln!("\nModel:\n===\n{}", &model);
 		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
@@ -331,11 +325,10 @@ Resources:
 		let path = Path::new("../../examples/tutorial/2.wa2tags.yaml");
 		let cfn_text = std::fs::read_to_string(path).unwrap();
 		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-		let model = projector
-			.project(&cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.ok()
-			.unwrap()
-			.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
 
 		//eprintln!("\nModel:\n===\n{}", &model);
 		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
@@ -353,11 +346,10 @@ Resources:
 		let path = Path::new("../../examples/tutorial/3.with-replication.yaml");
 		let cfn_text = std::fs::read_to_string(path).unwrap();
 		let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-		let model = projector
-			.project(&cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.ok()
-			.unwrap()
-			.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
 
 		//eprintln!("\nModel:\n===\n{}", &model);
 		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));

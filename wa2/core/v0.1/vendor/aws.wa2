@@ -2,10 +2,12 @@
 !version 0.1
 
 // Derive core:Store nodes from AWS storage resources
-map aws_stores_to_core {
-	// Query all cfn:Resource nodes that are storage types
-	let cfn_stores = ?(
-		//cfn:Resource[
+// REPLACES rust: derive_wa2_type
+rule resources_to_store {
+	// Query all resources that are storage types
+   // resources could be cloudformation or api
+	let rx_stores = ?(
+		//*:Resource[
 			aws:type in (
 					"AWS::EC2::Volume",
 					"AWS::EFS::FileSystem",
@@ -15,15 +17,15 @@ map aws_stores_to_core {
 	)
 
 	// For each cfn store, create a corresponding core:Store node
-	*(cfn_store in cfn_stores, {
+	*(rx_store in rx_stores, {
 		// Create new blank node with type core:Store
-		let store_node = +(_, wa2:type, core:Store)
+		let store = +(_, wa2:type, core:Store)
 		
 		// Link back to the source cfn:Resource
-		+(store_node, core:source, cfn_store)
+		+(store, core:source, rx_store)
 		
 		// Add to workload's containment hierarchy
-		+(core:workload, wa2:contains, store_node)
+		+(core:workload, wa2:contains, store)
 	})
 }
 

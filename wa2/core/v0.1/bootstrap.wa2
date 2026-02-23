@@ -1,0 +1,109 @@
+// bootstrap.wa2 - WA2 type system bootstrap
+
+namespace _internal {
+    // Native type mapping
+    struct Native {
+        rust: String
+        parser: String
+    }
+}
+
+namespace core {
+    // Architectural node types
+    enum Node { Store, Run, Move }
+
+    struct Workload {
+        nodes: Node[]
+    }
+
+    struct Evidence {
+        value: String
+    }
+
+    struct AssertFailure {
+        assertion: String
+    }
+
+    // Predicates
+    predicate source
+    predicate value
+}
+
+namespace cfn {
+    type Template
+    type Resource
+    type Parameter
+    type PseudoParameter
+    type Output
+    type Ref
+    type GetAtt
+    type Sub
+    type SubVarRef
+
+    predicate target
+    predicate attribute
+    predicate resources
+    predicate parameters
+    predicate outputs
+}
+
+namespace aws {
+    predicate type
+    predicate logicalId
+}
+
+// Singleton instance
+instance core:workload: core:Workload
+
+// Derivation rules
+rule derive_stores {
+    let cfn_stores = ?(//cfn:Resource[aws:type in (
+        "AWS::S3::Bucket",
+        "AWS::EC2::Volume",
+        "AWS::EFS::FileSystem"
+    )])
+
+    *(s in cfn_stores, {
+        let node = +(_, wa2:type, core:Store)
+        +(node, core:source, s)
+        +(core:workload, wa2:contains, node)
+    })
+}
+
+rule derive_runs {
+    let cfn_runs = ?(//cfn:Resource[aws:type in (
+        "AWS::EC2::Instance",
+        "AWS::Lambda::Function"
+    )])
+
+    *(r in cfn_runs, {
+        let node = +(_, wa2:type, core:Run)
+        +(node, core:source, r)
+        +(core:workload, wa2:contains, node)
+    })
+}
+
+rule derive_moves {
+    let cfn_moves = ?(//cfn:Resource[aws:type in (
+        "AWS::SQS::Queue",
+        "AWS::Kinesis::Stream"
+    )])
+
+    *(m in cfn_moves, {
+        let node = +(_, wa2:type, core:Move)
+        +(node, core:source, m)
+        +(core:workload, wa2:contains, node)
+    })
+}
+
+rule derive_replication_evidence {
+    let replicated = ?(//core:Store[
+        core:source/aws:ReplicationConfiguration/aws:Rules/*/aws:Status = "Enabled"
+    ])
+
+    *(store in replicated, {
+        let evidence = +(_, wa2:type, core:Evidence)
+        +(evidence, core:value, "DataResilience")
+        +(store, wa2:contains, evidence)
+    })
+}

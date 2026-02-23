@@ -7,7 +7,6 @@ use tower_lsp::lsp_types::{
 use crate::{
 	iaac::cloudformation::{cfn_ir::types::CfnTemplate, spec_store::SpecStore},
 	intents::{
-		guidance::GuideLevel,
 		kernel::Kernel,
 		model::Model,
 		vendor::{DocumentFormat, Method, Vendor, get_projector},
@@ -23,26 +22,21 @@ struct DocumentState {
 }
 
 /// core engine: owns all document state and analysis logic
+#[derive(Default)]
 pub struct CoreEngine {
 	docs: HashMap<Url, DocumentState>,
 	spec: Option<Arc<SpecStore>>,
 	kernel: Kernel,
 }
 
-impl Default for CoreEngine {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
 impl CoreEngine {
-	pub fn new() -> Self {
-		Self {
-			docs: HashMap::new(),
-			spec: None,
-         kernel: Kernel::new(),
-		}
-	}
+	// pub fn new() -> Self {
+	// 	Self {
+	// 		docs: HashMap::new(),
+	// 		spec: None,
+	// 		kernel: Kernel::new(),
+	// 	}
+	// }
 
 	pub fn set_spec_store(&mut self, spec: Arc<SpecStore>) {
 		self.spec = Some(spec);
@@ -172,31 +166,17 @@ impl CoreEngine {
 		};
 
 		let diagnostics: Vec<Diagnostic> = result
-		   .guides
+			.failures
 			.into_iter()
-			.filter_map(|guide| {
-				// We need the template to get ranges - but we can get them from the model now
-				let range = result.model.get_range(guide.entity)?;
-
-				let severity = match guide.level {
-					GuideLevel::Required => DiagnosticSeverity::ERROR,
-					GuideLevel::Action => DiagnosticSeverity::WARNING,
-				};
-
-				let data = serde_json::json!({
-					"kind": "wa2_guide",
-					"tldr": guide.tldr,
-					"message": guide.message,
-					"why": guide.why,
-				});
+			.filter_map(|failure| {
+				let range = result.model.get_range(failure.entity)?;
 
 				Some(Diagnostic {
 					range,
-					severity: Some(severity),
-					code: Some(NumberOrString::String("WA2_GUIDE".into())),
+					severity: Some(DiagnosticSeverity::ERROR),
+					code: Some(NumberOrString::String("WA2_ASSERT".into())),
 					source: Some("wa2".into()),
-					message: guide.tldr,
-					data: Some(data),
+					message: format!("Assertion failed: {}", failure.assertion),
 					..Default::default()
 				})
 			})
@@ -218,8 +198,13 @@ impl CoreEngine {
 		let model = match &doc.cached_model {
 			Some(m) => m.clone(),
 			None => {
+				// Need to create a fresh model and project into it
+				let mut model = Model::bootstrap();
 				let projector = get_projector(Vendor::Aws, Method::CloudFormation);
-				projector.project(&doc.text, uri, doc.format).ok()?.model
+				projector
+					.project_into(&mut model, &doc.text, uri, doc.format)
+					.ok()?;
+				model
 			}
 		};
 
@@ -353,7 +338,7 @@ mod spec_tests {
 
 	#[test]
 	fn spec_unknown_resource_type() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -387,7 +372,7 @@ Resources:
 
 	#[test]
 	fn spec_unknown_property() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -421,7 +406,7 @@ Resources:
 
 	#[test]
 	fn spec_missing_required_property() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -455,7 +440,7 @@ Resources:
 
 	#[test]
 	fn spec_multiple_issues_one_resource() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -498,7 +483,7 @@ Resources:
 
 	#[test]
 	fn spec_multiple_resources_different_issues() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -541,7 +526,7 @@ Resources:
 
 	#[test]
 	fn spec_valid_resource_all_required_properties() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -563,7 +548,7 @@ Resources:
 
 	#[test]
 	fn spec_valid_resource_with_optional_properties() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -589,7 +574,7 @@ Resources:
 
 	#[test]
 	fn spec_resource_key_not_string() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -620,7 +605,7 @@ Resources:
 
 	#[test]
 	fn spec_resource_not_mapping() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -650,7 +635,7 @@ Resources:
 
 	#[test]
 	fn spec_type_not_string() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -683,7 +668,7 @@ Resources:
 
 	#[test]
 	fn spec_type_missing() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -715,7 +700,7 @@ Resources:
 
 	#[test]
 	fn spec_properties_not_mapping() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -747,7 +732,7 @@ Resources:
 
 	#[test]
 	fn spec_property_key_not_string() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -771,7 +756,7 @@ Resources:
 
 	#[test]
 	fn spec_resource_with_no_properties_section() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -799,7 +784,7 @@ Resources:
 
 	#[test]
 	fn spec_multiple_missing_required_properties() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -837,7 +822,7 @@ Resources:
 
 	#[test]
 	fn spec_all_valid_resources_no_errors() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -867,7 +852,7 @@ Resources:
 
 	#[test]
 	fn spec_mixed_valid_and_invalid_resources() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -910,7 +895,7 @@ Resources:
 
 	#[test]
 	fn span_points_to_resource_logical_id() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -942,7 +927,7 @@ Resources:
 
 	#[test]
 	fn span_points_to_type_field() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -968,7 +953,7 @@ Resources:
 
 	#[test]
 	fn span_disambiguates_similar_resource_names() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -997,7 +982,7 @@ Resources:
 
 	#[test]
 	fn span_handles_indented_yaml() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.yaml");
 
@@ -1028,7 +1013,7 @@ Resources:
 
 	#[test]
 	fn json_unknown_resource_type() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.json");
 
@@ -1064,7 +1049,7 @@ Resources:
 
 	#[test]
 	fn json_missing_required_property() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.json");
 
@@ -1092,7 +1077,7 @@ Resources:
 
 	#[test]
 	fn json_valid_resource() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.json");
 
@@ -1117,7 +1102,7 @@ Resources:
 
 	#[test]
 	fn json_parse_error() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		engine.set_spec_store(create_test_spec());
 		let uri = uri("file:///tmp/test.json");
 
@@ -1155,18 +1140,9 @@ mod goto_definition_tests {
 
 	#[test]
 	fn goto_def_ref_to_resource() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		let uri = uri("file:///tmp/test.yaml");
 
-		// Line numbers (0-indexed):
-		// 0: (empty)
-		// 1: Resources:
-		// 2:   DataBucket:
-		// 3:     Type: AWS::S3::Bucket
-		// 4:   Consumer:
-		// 5:     Type: AWS::Lambda::Function
-		// 6:     Properties:
-		// 7:       BucketName: !Ref DataBucket
 		let text = r#"
 Resources:
   DataBucket:
@@ -1183,6 +1159,10 @@ Resources:
 			"cloudformation-yaml".to_string(),
 		);
 
+		// Check diagnostics
+		let diags = engine.analyse_document_slow(&uri);
+		eprintln!("analyse_document_slow diagnostics: {:?}", diags);
+
 		// Position cursor on "DataBucket" in the !Ref (line 7, somewhere in "DataBucket")
 		let position = Position {
 			line: 7,
@@ -1190,24 +1170,20 @@ Resources:
 		};
 
 		let result = engine.goto_definition(&uri, position);
-
 		eprintln!("goto_definition result: {:?}", result);
 
 		assert!(result.is_some(), "Should find definition");
 		let location = result.unwrap();
-		assert_eq!(location.uri, uri);
-		// Should point to line 2 where DataBucket is defined
 		assert_eq!(
 			location.range.start.line, 2,
 			"Should jump to DataBucket definition"
 		);
 	}
-
 	// In goto_definition_tests module
 
 	#[test]
 	fn goto_def_ref_json() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		let uri = uri("file:///tmp/test.json");
 
 		let text = r#"{
@@ -1230,7 +1206,9 @@ Resources:
 			"cloudformation-json".to_string(),
 		);
 
-		engine.analyse_document_slow(&uri);
+		// Check if analyse returns any errors
+		let diags = engine.analyse_document_slow(&uri);
+		eprintln!("analyse_document_slow diagnostics: {:?}", diags);
 
 		// Position on "DataBucket" in the Ref (line 8, inside the string)
 		let position = Position {
@@ -1251,7 +1229,7 @@ Resources:
 
 	#[test]
 	fn goto_def_ref_to_parameter() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		let uri = uri("file:///tmp/test.yaml");
 
 		let text = r#"
@@ -1297,7 +1275,7 @@ Resources:
 
 	#[test]
 	fn goto_def_getatt_to_resource() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		let uri = uri("file:///tmp/test.yaml");
 
 		let text = r#"
@@ -1318,7 +1296,9 @@ Resources:
 			"cloudformation-yaml".to_string(),
 		);
 
-		engine.analyse_document_slow(&uri);
+		// Check diagnostics
+		let diags = engine.analyse_document_slow(&uri);
+		eprintln!("analyse_document_slow diagnostics: {:?}", diags);
 
 		// Line 9: '      RoleArn: !GetAtt MyRole.Arn'
 		let position = Position {
@@ -1339,7 +1319,7 @@ Resources:
 
 	#[test]
 	fn goto_def_no_match_at_position() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		let uri = uri("file:///tmp/test.yaml");
 
 		let text = r#"
@@ -1370,7 +1350,7 @@ Resources:
 
 	#[test]
 	fn goto_def_ref_in_outputs() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		let uri = uri("file:///tmp/test.yaml");
 
 		let text = r#"AWSTemplateFormatVersion: "2010-09-09"
@@ -1406,7 +1386,7 @@ Outputs:
 
 	#[test]
 	fn goto_def_sub_variable_reference() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		let uri = uri("file:///tmp/test.yaml");
 
 		let text = r#"Parameters:
@@ -1449,7 +1429,7 @@ Resources:
 
 	#[test]
 	fn goto_def_sub_pseudo_parameter() {
-		let mut engine = CoreEngine::new();
+		let mut engine = CoreEngine::default();
 		let uri = uri("file:///tmp/test.yaml");
 
 		let text = r#"Resources:

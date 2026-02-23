@@ -6,9 +6,9 @@ mod tests;
 
 use tower_lsp::lsp_types::{Diagnostic, Url};
 
-use crate::intents::model::Model;
-use crate::intents::vendor::{DocumentFormat, ProjectionResult, VendorProjector};
 use crate::iaac::cloudformation::cfn_ir::types::CfnTemplate;
+use crate::intents::model::{Model, ModelError};
+use crate::intents::vendor::{DocumentFormat, VendorProjector};
 
 /// AWS CloudFormation projector
 pub struct AwsCfnProjector;
@@ -26,71 +26,99 @@ impl Default for AwsCfnProjector {
 }
 
 impl VendorProjector for AwsCfnProjector {
-	fn project(
+	fn project_into(
 		&self,
+		model: &mut Model,
 		text: &str,
 		uri: &Url,
 		format: DocumentFormat,
-	) -> Result<ProjectionResult, Vec<Diagnostic>> {
-		// Parse CFN template
+	) -> Result<(), Vec<Diagnostic>> {
 		let template = match format {
-			DocumentFormat::Json => CfnTemplate::from_json(text, uri)?,
-			DocumentFormat::Yaml => CfnTemplate::from_yaml(text, uri)?,
-		};
+			DocumentFormat::Json => CfnTemplate::from_json(text, uri),
+			DocumentFormat::Yaml => CfnTemplate::from_yaml(text, uri),
+		}?;
 
-		// Project into model
-		let model = project_template(&template)?;
-
-		Ok(ProjectionResult {
-			model,
-			diagnostics: vec![],
-		})
+		project_template_into(model, &template).map_err(model_error_to_diags)
 	}
 }
 
-/// Project a parsed CFN template into a Model
-pub fn project_template(template: &CfnTemplate) -> Result<Model, Vec<Diagnostic>> {
-	let mut model = Model::bootstrap();
-	cfn_projector::ensure_core_types(&mut model).map_err(model_error_to_diags)?;
-	cfn_projector::ensure_aws_types(&mut model).map_err(model_error_to_diags)?;
-	cfn_projector::ensure_cfn_types(&mut model).map_err(model_error_to_diags)?;
+pub fn project_template_into(model: &mut Model, template: &CfnTemplate) -> Result<(), ModelError> {
+	// Ensure types exist (idempotent if already loaded from bootstrap.wa2)
+	cfn_projector::ensure_cfn_types(model)?;
+	cfn_projector::ensure_aws_types(model)?;
+	cfn_projector::ensure_core_types(model)?;
 
-	// Create template entity as root
+	// Create template entity
 	let template_entity = model.blank();
-	model
-		.apply_to(template_entity, "wa2:type", "cfn:Template")
-		.map_err(model_error_to_diags)?;
+	model.apply_to(template_entity, "wa2:type", "cfn:Template")?;
 
-	// Create workload linked to template, set as root
-	let workload = model.ensure_entity("core:workload");
-	model
-		.apply_to(workload, "wa2:type", "core:Workload")
-		.map_err(model_error_to_diags)?;
-	model
-		.apply_entity(workload, "core:source", template_entity)
-		.map_err(model_error_to_diags)?;
+	// Create or get workload, set as root
+	let workload = model.ensure_entity("core:workload")?;
+	model.apply_to(workload, "wa2:type", "core:Workload")?;
+	model.apply_entity(workload, "core:source", template_entity)?;
 	model.set_root(workload);
 
 	// Project template sections
-	cfn_projector::project_outputs(&mut model, template_entity, &template.outputs)
-		.map_err(model_error_to_diags)?;
-	cfn_projector::project_parameters(&mut model, template_entity, &template.parameters)
-		.map_err(model_error_to_diags)?;
-	cfn_projector::project_pseudo_parameters(&mut model, template_entity)
-		.map_err(model_error_to_diags)?;
+	cfn_projector::project_outputs(model, template_entity, &template.outputs)?;
+	cfn_projector::project_parameters(model, template_entity, &template.parameters)?;
+	cfn_projector::project_pseudo_parameters(model, template_entity)?;
 
-	let entities =
-		cfn_projector::project_resources(&mut model, template_entity, &template.resources)
-			.map_err(model_error_to_diags)?;
+	let entities = cfn_projector::project_resources(model, template_entity, &template.resources)?;
 
-	// Derive phase - creates core:Nodes attached to workload
+	// Derive phase
 	for entity in entities {
-		derivation::derive_wa2_type(&mut model, entity, workload).map_err(model_error_to_diags)?;
-		derivation::derive_evidence(&mut model, entity).map_err(model_error_to_diags)?;
+		derivation::derive_wa2_type(model, entity, workload)?;
+		derivation::derive_evidence(model, entity)?;
 	}
 
-	Ok(model)
+	Ok(())
 }
+
+/// Project a parsed CFN template into a Model
+// pub fn project_template(template: &CfnTemplate) -> Result<Model, Vec<Diagnostic>> {
+// 	let mut model = Model::bootstrap();
+// 	cfn_projector::ensure_core_types(&mut model).map_err(model_error_to_diags)?;
+// 	cfn_projector::ensure_aws_types(&mut model).map_err(model_error_to_diags)?;
+// 	cfn_projector::ensure_cfn_types(&mut model).map_err(model_error_to_diags)?;
+
+// 	// Create template entity as root
+// 	let template_entity = model.blank();
+// 	model
+// 		.apply_to(template_entity, "wa2:type", "cfn:Template")
+// 		.map_err(model_error_to_diags)?;
+
+// 	// Create workload linked to template, set as root
+// 	let workload = model
+// 		.ensure_entity("core:workload")
+// 		.map_err(model_error_to_diags)?;
+// 	model
+// 		.apply_to(workload, "wa2:type", "core:Workload")
+// 		.map_err(model_error_to_diags)?;
+// 	model
+// 		.apply_entity(workload, "core:source", template_entity)
+// 		.map_err(model_error_to_diags)?;
+// 	model.set_root(workload);
+
+// 	// Project template sections
+// 	cfn_projector::project_outputs(&mut model, template_entity, &template.outputs)
+// 		.map_err(model_error_to_diags)?;
+// 	cfn_projector::project_parameters(&mut model, template_entity, &template.parameters)
+// 		.map_err(model_error_to_diags)?;
+// 	cfn_projector::project_pseudo_parameters(&mut model, template_entity)
+// 		.map_err(model_error_to_diags)?;
+
+// 	let entities =
+// 		cfn_projector::project_resources(&mut model, template_entity, &template.resources)
+// 			.map_err(model_error_to_diags)?;
+
+// 	// Derive phase - creates core:Nodes attached to workload
+// 	for entity in entities {
+// 		derivation::derive_wa2_type(&mut model, entity, workload).map_err(model_error_to_diags)?;
+// 		derivation::derive_evidence(&mut model, entity).map_err(model_error_to_diags)?;
+// 	}
+
+// 	Ok(model)
+// }
 
 fn model_error_to_diags(err: crate::intents::model::ModelError) -> Vec<Diagnostic> {
 	vec![Diagnostic {
@@ -113,7 +141,7 @@ mod projection_tests {
 
 	#[test]
 	fn debug_getatt_ranges() {
-		let text = r#"
+		let cfn_text = r#"
 Resources:
   MyRole:
     Type: AWS::IAM::Role
@@ -126,10 +154,11 @@ Resources:
 "#;
 
 		let projector = AwsCfnProjector::new();
-		let result = projector
-			.project(text, &test_uri(), DocumentFormat::Yaml)
-			.expect("project");
-		let model = result.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
+		
 
 		eprintln!("\n=== All entities with source ranges (GetAtt test) ===");
 		for i in 0..model.entity_count() {
@@ -151,7 +180,7 @@ Resources:
 
 	#[test]
 	fn debug_sub_var_refs() {
-		let text = r#"Parameters:
+		let cfn_text = r#"Parameters:
   DataBucketName:
     Type: String
 Resources:
@@ -162,10 +191,11 @@ Resources:
 "#;
 
 		let projector = AwsCfnProjector::new();
-		let result = projector
-			.project(text, &test_uri(), DocumentFormat::Yaml)
-			.expect("project");
-		let model = result.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
+		
 
 		// Check for SubVarRef nodes
 		let sub_var_ref_type = model
@@ -189,7 +219,7 @@ Resources:
 
 	#[test]
 	fn project_json_basic() {
-		let text = r#"{
+		let cfn_text = r#"{
   "Resources": {
     "MyBucket": {
       "Type": "AWS::S3::Bucket",
@@ -202,10 +232,11 @@ Resources:
 
 		let projector = AwsCfnProjector::new();
 		let uri = Url::parse("file:///tmp/test.json").unwrap();
+      let mut model = Model::bootstrap();
 		let result = projector
-			.project(text, &uri, DocumentFormat::Json)
+			.project_into(&mut model, cfn_text, &uri, DocumentFormat::Json)
 			.expect("project");
-		let model = result.model;
+		
 
 		// Verify resource was projected
 		let bucket = model.resolve("MyBucket").expect("MyBucket should exist");
@@ -217,7 +248,7 @@ Resources:
 
 	#[test]
 	fn project_json_ref() {
-		let text = r#"{
+		let cfn_text = r#"{
   "Parameters": {
     "Environment": {
       "Type": "String"
@@ -235,10 +266,11 @@ Resources:
 
 		let projector = AwsCfnProjector::new();
 		let uri = Url::parse("file:///tmp/test.json").unwrap();
-		let result = projector
-			.project(text, &uri, DocumentFormat::Json)
-			.expect("project");
-		let model = result.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
+		
 
 		// Verify Ref node exists and has correct type
 		let cfn_ref_type = model.resolve("cfn:Ref").expect("cfn:Ref should exist");
@@ -262,7 +294,7 @@ Resources:
 
 	#[test]
 	fn project_json_getatt() {
-		let text = r#"{
+		let cfn_text = r#"{
   "Resources": {
     "MyRole": {
       "Type": "AWS::IAM::Role",
@@ -281,10 +313,11 @@ Resources:
 
 		let projector = AwsCfnProjector::new();
 		let uri = Url::parse("file:///tmp/test.json").unwrap();
-		let result = projector
-			.project(text, &uri, DocumentFormat::Json)
-			.expect("project");
-		let model = result.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
+		
 
 		// Verify GetAtt node exists
 		let cfn_getatt_type = model
@@ -315,7 +348,7 @@ Resources:
 
 	#[test]
 	fn project_json_sub() {
-		let text = r#"{
+		let cfn_text = r#"{
   "Parameters": {
     "BucketName": {
       "Type": "String"
@@ -333,10 +366,11 @@ Resources:
 
 		let projector = AwsCfnProjector::new();
 		let uri = Url::parse("file:///tmp/test.json").unwrap();
-		let result = projector
-			.project(text, &uri, DocumentFormat::Json)
-			.expect("project");
-		let model = result.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
+		
 
 		// Check for SubVarRef nodes
 		let sub_var_ref_type = model
@@ -360,7 +394,7 @@ Resources:
 	#[test]
 	fn project_json_getatt_dotted_string() {
 		// JSON also supports the dotted string form for GetAtt
-		let text = r#"{
+		let cfn_text = r#"{
   "Resources": {
     "MyRole": {
       "Type": "AWS::IAM::Role",
@@ -379,10 +413,11 @@ Resources:
 
 		let projector = AwsCfnProjector::new();
 		let uri = Url::parse("file:///tmp/test.json").unwrap();
-		let result = projector
-			.project(text, &uri, DocumentFormat::Json)
-			.expect("project");
-		let model = result.model;
+		let mut model = Model::bootstrap();
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
+		
 
 		// Verify GetAtt node exists and targets MyRole
 		let cfn_getatt_type = model

@@ -39,7 +39,7 @@ impl Backend {
 impl Backend {
 	pub fn new(client: Client) -> Self {
 		// core engine, task notification and atomic generation counter
-		let engine = Arc::new(Mutex::new(CoreEngine::new()));
+		let engine = Arc::new(Mutex::new(CoreEngine::default()));
 		let notify = Arc::new(Notify::new());
 		let event_queue: Arc<Mutex<VecDeque<Url>>> = Arc::new(Mutex::new(VecDeque::new()));
 

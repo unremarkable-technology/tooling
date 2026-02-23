@@ -43,19 +43,20 @@ pub enum Method {
 
 /// Result of projecting IaC into a Model
 pub struct ProjectionResult {
-	pub model: Model,
-	pub diagnostics: Vec<Diagnostic>,
+    pub model: Model,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Trait for vendor-specific projectors
 pub trait VendorProjector {
-	/// Project infrastructure-as-code text into a Model
-	fn project(
-		&self,
-		text: &str,
-		uri: &Url,
-		format: DocumentFormat,
-	) -> Result<ProjectionResult, Vec<Diagnostic>>;
+    /// Project infrastructure-as-code text into an existing Model
+    fn project_into(
+        &self,
+        model: &mut Model,
+        text: &str,
+        uri: &Url,
+        format: DocumentFormat,
+    ) -> Result<(), Vec<Diagnostic>>;
 }
 
 /// Get the appropriate projector for a vendor/method combination

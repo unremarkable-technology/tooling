@@ -54,7 +54,7 @@ const CFN_PREDICATES: &[&str] = &[
 
 /// Ensure core architectural types exist in the model
 pub fn ensure_core_types(model: &mut Model) -> Result<(), ModelError> {
-	model.ensure_entity("core");
+	model.ensure_namespace("core")?;
 
 	// DSL: enum Node { Run, Store, Move }
 	model.apply("core:Node", "wa2:type", "wa2:Type")?;
@@ -86,22 +86,22 @@ pub fn ensure_core_types(model: &mut Model) -> Result<(), ModelError> {
 
 /// Ensure CFN-specific types and predicates exist in the model
 pub fn ensure_aws_types(model: &mut Model) -> Result<(), ModelError> {
-	model.ensure_entity("aws");
+	model.ensure_namespace("aws")?;
 
 	Ok(())
 }
 
 /// Ensure CFN-specific types and predicates exist in the model
 pub fn ensure_cfn_types(model: &mut Model) -> Result<(), ModelError> {
-	model.ensure_entity("cfn");
-	model.ensure_entity("cfn:Output");
-	model.ensure_entity("cfn:Resource");
-	model.ensure_entity("cfn:outputs");
-	model.ensure_entity("cfn:resources");
-	model.ensure_entity("cfn:value");
-	model.ensure_entity("cfn:exportName");
-	model.ensure_entity("cfn:SubVarRef");
-	model.ensure_entity("cfn:varRef");
+	model.ensure_namespace("cfn")?;
+	model.ensure_entity("cfn:Output")?;
+	model.ensure_entity("cfn:Resource")?;
+	model.ensure_entity("cfn:outputs")?;
+	model.ensure_entity("cfn:resources")?;
+	model.ensure_entity("cfn:value")?;
+	model.ensure_entity("cfn:exportName")?;
+	model.ensure_entity("cfn:SubVarRef")?;
+	model.ensure_entity("cfn:varRef")?;
 
 	model.apply("cfn:Template", "wa2:type", "wa2:Type")?;
 	model.apply("cfn:Parameter", "wa2:type", "wa2:Type")?;
@@ -172,7 +172,7 @@ pub fn project_value(
 		// Intrinsic functions as typed nodes
 		CfnValue::Ref { target, .. } => {
 			let node = project_intrinsic(model, parent, &pred, value)?;
-			let target_entity = model.ensure_entity(target);
+			let target_entity = model.ensure_raw(target);
 			model.apply_entity(node, "cfn:target", target_entity)?;
 		}
 
@@ -180,7 +180,7 @@ pub fn project_value(
 			target, attribute, ..
 		} => {
 			let node = project_intrinsic(model, parent, &pred, value)?;
-			let target_entity = model.ensure_entity(target);
+			let target_entity = model.ensure_raw(target);
 			model.apply_entity(node, "cfn:target", target_entity)?;
 			model.apply_to(node, "cfn:attribute", &format!("\"{}\"", attribute))?;
 		}
@@ -194,7 +194,7 @@ pub fn project_value(
 
 			// Get template string content
 			if let CfnValue::String(template_str, _) = template.as_ref() {
-				model.apply_to(node, "cfn:template", template_str)?;
+				model.apply_to(node, "cfn:template", &format!("\"{}\"", template_str))?;
 
 				// Create per-variable reference nodes with source ranges
 				let var_positions = extract_sub_variable_positions(template_str);
@@ -431,13 +431,13 @@ fn project_array_item(
 
 				match other {
 					CfnValue::Ref { target, .. } => {
-						let target_entity = model.ensure_entity(target);
+						let target_entity = model.ensure_raw(target);
 						model.apply_entity(item, "cfn:target", target_entity)?;
 					}
 					CfnValue::GetAtt {
 						target, attribute, ..
 					} => {
-						let target_entity = model.ensure_entity(target);
+						let target_entity = model.ensure_raw(target);
 						model.apply_entity(item, "cfn:target", target_entity)?;
 						model.apply_to(item, "cfn:attribute", &format!("\"{}\"", attribute))?;
 					}
@@ -449,7 +449,7 @@ fn project_array_item(
 						if let Some(s) = template.as_str() {
 							model.apply_to(item, "cfn:template", &format!("\"{}\"", s))?;
 							for (var_name, _, _) in extract_sub_variable_positions(s) {
-								let target_entity = model.ensure_entity(&var_name);
+								let target_entity = model.ensure_raw(&var_name);
 								model.apply_entity(item, "cfn:target", target_entity)?;
 							}
 						}
@@ -585,7 +585,7 @@ pub fn project_parameters(
 	model.apply_entity(template_entity, "cfn:parameters", params_container)?;
 
 	for (name, param) in parameters {
-		let param_entity = model.ensure_entity(name);
+		let param_entity = model.ensure_raw(name);
 		model.apply_to(param_entity, "wa2:type", "cfn:Parameter")?;
 		model.apply_to(
 			param_entity,
@@ -630,7 +630,7 @@ pub fn project_pseudo_parameters(
 	];
 
 	for name in pseudo_params {
-		let pseudo_entity = model.ensure_entity(name);
+		let pseudo_entity = model.ensure_raw(name);
 		model.apply_to(pseudo_entity, "wa2:type", "cfn:PseudoParameter")?;
 		model.apply_entity(pseudo_container, "wa2:contains", pseudo_entity)?;
 	}
@@ -686,7 +686,7 @@ pub fn project_resources(
 	let mut entities = Vec::new();
 
 	for resource in resources.values() {
-		let entity = model.ensure_entity(&resource.logical_id);
+		let entity = model.ensure_raw(&resource.logical_id);
 		model.apply_to(entity, "wa2:type", "cfn:Resource")?;
 		model.apply_to(
 			entity,

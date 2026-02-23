@@ -313,7 +313,7 @@ impl Model {
 		model.add_statement_raw(DOMAIN, TYPE_PRED, Value::Entity(PREDICATE));
 		model.add_statement_raw(RANGE, TYPE_PRED, Value::Entity(PREDICATE));
 		model.add_statement_raw(SUB_TYPE_OF, TYPE_PRED, Value::Entity(PREDICATE));
-      
+
 		// Cardinality constraints
 		model.add_statement_raw(TYPE_PRED, CARDINALITY, Value::Number(1));
 		model.add_statement_raw(NAMESPACE_PRED, CARDINALITY, Value::Number(1));
@@ -377,19 +377,68 @@ impl Model {
 		self.add_entity_raw(None, None)
 	}
 
-	/// Ensure entity exists, creating if needed
-	pub fn ensure_entity(&mut self, name: &str) -> EntityId {
+	/// Create a namespace entity with proper typing
+	pub fn ensure_namespace(&mut self, name: &str) -> Result<EntityId, ModelError> {
 		if let Some(id) = self.resolve(name) {
-			return id;
+			// Verify it's a namespace
+			if !self.has_type(id, NAMESPACE_TYPE) {
+				return Err(ModelError::InvalidStatement(format!(
+					"'{}' exists but is not a namespace",
+					name
+				)));
+			}
+			return Ok(id);
+		}
+
+		// Handle nested namespaces: parent:child
+		let id = if let Some((parent_name, local)) = name.split_once(':') {
+			let parent_id = self.ensure_namespace(parent_name)?;
+			self.add_entity_raw(Some(local), Some(parent_id))
+		} else {
+			self.add_entity_raw(Some(name), None)
+		};
+
+		// Type it as namespace
+		self.add_statement_raw(id, TYPE_PRED, Value::Entity(NAMESPACE_TYPE));
+
+		Ok(id)
+	}
+
+	/// Ensure entity exists, creating if needed
+	/// Returns error if namespace doesn't exist or isn't typed as wa2:Namespace
+	pub fn ensure_entity(&mut self, name: &str) -> Result<EntityId, ModelError> {
+		if let Some(id) = self.resolve(name) {
+			return Ok(id);
 		}
 
 		// Parse namespace:local
 		if let Some((ns_name, local)) = name.split_once(':') {
-			let ns_id = self.ensure_entity(ns_name);
-			self.add_entity_raw(Some(local), Some(ns_id))
+			let ns_id = self.resolve(ns_name).ok_or_else(|| {
+				ModelError::NotFound(format!("namespace '{}' not found", ns_name))
+			})?;
+
+			// Verify it's actually a namespace
+			if !self.has_type(ns_id, NAMESPACE_TYPE) {
+				return Err(ModelError::InvalidStatement(format!(
+					"'{}' is not a namespace (missing wa2:type = wa2:Namespace)",
+					ns_name
+				)));
+			}
+
+			Ok(self.add_entity_raw(Some(local), Some(ns_id)))
 		} else {
-			self.add_entity_raw(Some(name), None)
+			Ok(self.add_entity_raw(Some(name), None))
 		}
+	}
+
+	/// Create entity with raw name (no namespace parsing)
+	/// Use for vendor identifiers like CFN logical IDs
+	pub fn ensure_raw(&mut self, name: &str) -> EntityId {
+		if let Some(id) = self.by_name.get(name) {
+			return *id;
+		}
+
+		self.add_entity_raw(Some(name), None)
 	}
 
 	// ─── Statements ───
@@ -401,9 +450,9 @@ impl Model {
 		predicate: &str,
 		object: &str,
 	) -> Result<StatementId, ModelError> {
-		let subj_id = self.ensure_entity(subject);
-		let pred_id = self.ensure_entity(predicate);
-		let obj_val = self.parse_object(object);
+		let subj_id = self.ensure_entity(subject)?;
+		let pred_id = self.ensure_entity(predicate)?;
+		let obj_val = self.parse_object(object)?;
 
 		self.apply_value(subj_id, pred_id, obj_val)
 	}
@@ -415,8 +464,8 @@ impl Model {
 		predicate: &str,
 		object: &str,
 	) -> Result<StatementId, ModelError> {
-		let pred_id = self.ensure_entity(predicate);
-		let obj_val = self.parse_object(object);
+		let pred_id = self.ensure_entity(predicate)?;
+		let obj_val = self.parse_object(object)?;
 
 		self.apply_value(subject, pred_id, obj_val)
 	}
@@ -428,7 +477,7 @@ impl Model {
 		predicate: &str,
 		object: EntityId,
 	) -> Result<StatementId, ModelError> {
-		let pred_id = self.ensure_entity(predicate);
+		let pred_id = self.ensure_entity(predicate)?;
 		self.apply_value(subject, pred_id, Value::Entity(object))
 	}
 
@@ -476,19 +525,19 @@ impl Model {
 	}
 
 	/// Parse object string into Value
-	fn parse_object(&mut self, object: &str) -> Value {
+	fn parse_object(&mut self, object: &str) -> Result<Value, ModelError> {
 		// Literal string in quotes
 		if object.starts_with('"') && object.ends_with('"') {
-			return Value::Literal(object[1..object.len() - 1].to_string());
+			return Ok(Value::Literal(object[1..object.len() - 1].to_string()));
 		}
 
 		// Try parsing as number
 		if let Ok(n) = object.parse::<i64>() {
-			return Value::Number(n);
+			return Ok(Value::Number(n));
 		}
 
 		// Otherwise it's an entity reference
-		Value::Entity(self.ensure_entity(object))
+		Ok(Value::Entity(self.ensure_entity(object)?))
 	}
 
 	/// Check if statement exists
@@ -506,13 +555,19 @@ impl Model {
 
 	// ─── Resolution ───
 
-	/// Resolve name to entity ("aws" or "aws:Bucket")
+	/// Resolve name to entity ("aws" or "aws:Bucket" or raw "AWS::AccountId")
 	pub fn resolve(&self, name: &str) -> Option<EntityId> {
+		// First try exact match (handles raw names like "AWS::AccountId")
+		if let Some(&id) = self.by_name.get(name) {
+			return Some(id);
+		}
+
+		// Then try namespace:local parsing
 		if let Some((ns_name, local)) = name.split_once(':') {
 			let ns_id = self.resolve(ns_name)?;
 			self.by_qualified.get(&(ns_id, local.to_string())).copied()
 		} else {
-			self.by_name.get(name).copied()
+			None
 		}
 	}
 
@@ -610,6 +665,11 @@ impl Model {
 	/// Set the root for queries
 	pub fn set_root(&mut self, id: EntityId) {
 		self.root = Some(id);
+	}
+
+	// Expose root for query engine
+	pub fn root(&self) -> Option<EntityId> {
+		self.root
 	}
 
 	/// Execute query from root
@@ -1069,27 +1129,49 @@ mod tests {
 	fn test_ensure_entity() {
 		let mut model = Model::bootstrap();
 
-		// Create simple entity
-		let foo = model.ensure_entity("foo");
+		// Create simple entity (no namespace)
+		let foo = model.ensure_entity("foo").unwrap();
 		assert_eq!(model.resolve("foo"), Some(foo));
 
-		// Create namespaced entity
-		let bar_baz = model.ensure_entity("bar:baz");
-		assert_eq!(model.resolve("bar:baz"), Some(bar_baz));
+		// Create namespace first
+		let bar = model.ensure_namespace("bar").unwrap();
 
-		// bar namespace should also exist
-		let bar = model.resolve("bar").expect("bar namespace should exist");
+		// Now create namespaced entity
+		let bar_baz = model.ensure_entity("bar:baz").unwrap();
+		assert_eq!(model.resolve("bar:baz"), Some(bar_baz));
 		assert_eq!(model.entity(bar_baz).namespace, Some(bar));
 
 		// Idempotent
-		assert_eq!(model.ensure_entity("foo"), foo);
-		assert_eq!(model.ensure_entity("bar:baz"), bar_baz);
+		assert_eq!(model.ensure_entity("foo").unwrap(), foo);
+		assert_eq!(model.ensure_entity("bar:baz").unwrap(), bar_baz);
+	}
+
+	#[test]
+	fn test_ensure_entity_fails_without_namespace() {
+		let mut model = Model::bootstrap();
+
+		// Should fail - "unknown" namespace doesn't exist
+		let result = model.ensure_entity("unknown:Thing");
+		assert!(matches!(result, Err(ModelError::NotFound(_))));
+	}
+
+	#[test]
+	fn test_ensure_entity_fails_if_not_namespace() {
+		let mut model = Model::bootstrap();
+
+		// Create "foo" as a plain entity, not a namespace
+		model.ensure_entity("foo").unwrap();
+
+		// Should fail - "foo" exists but isn't a namespace
+		let result = model.ensure_entity("foo:Bar");
+		assert!(matches!(result, Err(ModelError::InvalidStatement(_))));
 	}
 
 	#[test]
 	fn test_apply_statements() {
 		let mut model = Model::bootstrap();
 
+      model.ensure_namespace("core").unwrap();
 		// First ensure core types exist
 		model.apply("core:Store", "wa2:type", "wa2:Type").unwrap();
 		model.apply("core:Run", "wa2:type", "wa2:Type").unwrap();
@@ -1115,6 +1197,7 @@ mod tests {
 	fn test_apply_literals() {
 		let mut model = Model::bootstrap();
 
+      model.ensure_namespace("aws").unwrap();
 		model.apply("bucket", "aws:name", "\"my-bucket\"").unwrap();
 
 		let bucket = model.resolve("bucket").expect("bucket should exist");
@@ -1128,7 +1211,8 @@ mod tests {
 	fn test_blank_nodes() {
 		let mut model = Model::bootstrap();
 
-		let bucket = model.ensure_entity("bucket");
+      model.ensure_namespace("aws").unwrap();
+		let bucket = model.ensure_entity("bucket").unwrap();
 		model.apply_to(bucket, "wa2:type", "wa2:Store").unwrap();
 
 		// Create blank node for tags container
@@ -1156,6 +1240,7 @@ mod tests {
 	fn test_query_descendants() {
 		let mut model = Model::bootstrap();
 
+      model.ensure_namespace("core").unwrap();
 		// Ensure core types exist
 		model
 			.apply("core:Deployment", "wa2:type", "wa2:Type")
@@ -1164,21 +1249,21 @@ mod tests {
 		model.apply("core:Run", "wa2:type", "wa2:Type").unwrap();
 
 		// Create root
-		let root = model.ensure_entity("root");
+		let root = model.ensure_entity("root").unwrap();
 		model.apply_to(root, "wa2:type", "core:Deployment").unwrap();
 		model.set_root(root);
 
 		// Create stores
-		let bucket1 = model.ensure_entity("bucket1");
+		let bucket1 = model.ensure_entity("bucket1").unwrap();
 		model.apply_to(bucket1, "wa2:type", "core:Store").unwrap();
 		model.apply_entity(root, "wa2:contains", bucket1).unwrap();
 
-		let bucket2 = model.ensure_entity("bucket2");
+		let bucket2 = model.ensure_entity("bucket2").unwrap();
 		model.apply_to(bucket2, "wa2:type", "core:Store").unwrap();
 		model.apply_entity(root, "wa2:contains", bucket2).unwrap();
 
 		// Create a non-store
-		let lambda = model.ensure_entity("lambda");
+		let lambda = model.ensure_entity("lambda").unwrap();
 		model.apply_to(lambda, "wa2:type", "core:Run").unwrap();
 		model.apply_entity(root, "wa2:contains", lambda).unwrap();
 
@@ -1194,12 +1279,13 @@ mod tests {
 	fn test_query_with_filter() {
 		let mut model = Model::bootstrap();
 
+      model.ensure_namespace("aws").unwrap();
 		// Create root
-		let root = model.ensure_entity("root");
+		let root = model.ensure_entity("root").unwrap();
 		model.set_root(root);
 
 		// Create bucket with tags
-		let bucket = model.ensure_entity("bucket");
+		let bucket = model.ensure_entity("bucket").unwrap();
 		model.apply_to(bucket, "wa2:type", "wa2:Store").unwrap();
 		model.apply_entity(root, "wa2:contains", bucket).unwrap();
 
@@ -1218,8 +1304,8 @@ mod tests {
 		model.apply_entity(tags, "wa2:contains", tag).unwrap();
 
 		// Query: find tags with specific key
-		model.ensure_entity("aws:Tags"); // ensure types exist
-		model.ensure_entity("aws:Tag");
+		model.ensure_entity("aws:Tags").unwrap(); // ensure types exist
+		model.ensure_entity("aws:Tag").unwrap();
 
 		let result = model.query(
 			&Query::descendant("wa2:Store")
@@ -1242,8 +1328,8 @@ mod tests {
 	fn test_contains_relationship() {
 		let mut model = Model::bootstrap();
 
-		let parent = model.ensure_entity("parent");
-		let child = model.ensure_entity("child");
+		let parent = model.ensure_entity("parent").unwrap();
+		let child = model.ensure_entity("child").unwrap();
 
 		model.apply_entity(parent, "wa2:contains", child).unwrap();
 
@@ -1256,10 +1342,12 @@ mod tests {
 	fn test_multiple_types() {
 		let mut model = Model::bootstrap();
 
+      model.ensure_namespace("core").unwrap();
+      model.ensure_namespace("aws").unwrap();
 		// Ensure core:Store exists
 		model.apply("core:Store", "wa2:type", "wa2:Type").unwrap();
 
-		let bucket = model.ensure_entity("bucket");
+		let bucket = model.ensure_entity("bucket").unwrap();
 		model.apply_to(bucket, "wa2:type", "core:Store").unwrap();
 		model
 			.apply_to(bucket, "aws:vendorType", "\"AWS::S3::Bucket\"")

@@ -21,6 +21,7 @@ zip = "6.0.0"
 datatest-stable = "0.3.3"
 id-arena = "2.2.1"
 indexmap = "2.13.0"
+logos = { version = "0.15", features = ["forbid_unsafe" ] }
 
 [[test]]
 name = "fixtures"
