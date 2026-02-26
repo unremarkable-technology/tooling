@@ -58,7 +58,7 @@ namespace aws {
 		predicate outputs
 
 		rule derive_stores {
-			let cfn_stores = ?(//cfn:Resource[aws:type in (
+			let cfn_stores = ?(cfn:Resource[aws:type in (
 				"AWS::S3::Bucket",
 				"AWS::EC2::Volume",
 				"AWS::EFS::FileSystem"
@@ -72,7 +72,7 @@ namespace aws {
 		}
 
 		rule derive_runs {
-			let cfn_runs = ?(//cfn:Resource[aws:type in (
+			let cfn_runs = ?(cfn:Resource[aws:type in (
 				"AWS::EC2::Instance",
 				"AWS::Lambda::Function"
 			)])
@@ -85,7 +85,7 @@ namespace aws {
 		}
 
 		rule derive_moves {
-			let cfn_moves = ?(//cfn:Resource[aws:type in (
+			let cfn_moves = ?(cfn:Resource[aws:type in (
 				"AWS::SQS::Queue",
 				"AWS::Kinesis::Stream"
 			)])
@@ -114,10 +114,16 @@ namespace data {
 	struct Criticality {}
 
 	@#doc(
-		tldr = "Evidence of data resilience controls",
+		tldr = "Evidence of data being critical",
+		why = "Critical stores require additional protection controls."
+	)
+	type isCritical
+
+	@#doc(
+		tldr = "Evidence of data being resilient",
 		why = "Stores with resilience evidence are protected against data loss through replication, backups, or other recovery mechanisms."
 	)
-	struct Resilience {}
+	type isResilient
 
 	@#doc(
 		tldr = "Evidence of data sensitivity classification", 
@@ -130,43 +136,31 @@ namespace data {
 // FRAMEWORK: Policies
 // ═══════════════════════════════════════════════════════════════════
 
-// Governance → Policy → Control → Evidence
-//
-// - governance: enterprise configuration, loaded externally
-// - policy: groups related controls with modals
-// - rule: evaluates and creates evidence
-// - evidence: facts attached to nodes
-
 policy protect_critical_data {
-	must ensure_stores_have_data_criticality
+	must express_intent_store_criticality
 	must ensure_critical_stores_are_protected
 }
 
-rule ensure_stores_have_data_criticality {
-	let scope = ?(//core:Store)
+rule express_intent_store_criticality {
+	let scope = ?(core:Store)
 
-	// for all in scope, do we satisfy
 	*(store in scope, {
 		must ?(store/core:Evidence/data:Criticality) {
 			subject: store,
 			area: data:Criticality,
-			message: "Stores need to have criticality to understand intent"
+			message: "Stores need to have criticality classification"
 		}
 	})
 }
 
 rule ensure_critical_stores_are_protected {
-	// what do i look against
-	let scope = ?(//core:Store[
-		core:Evidence/data:Criticality
-	])
+	let scope = ?(core:Store[core:Evidence/data:isCritical])
 
-	// for all in scope, do we satisfy
 	*(store in scope, {
-		must ?(store/core:Evidence/data:Resilience) {
+		must ?(store/core:Evidence/data:isResilient) {
 			subject: store,
-			area: data:Resilience,
-			message: "Critical Stores need to be protected from loss"
+			area: data:isResilient,
+			message: "Critical stores need to be protected from loss"
 		}
 	})
 }
@@ -175,124 +169,83 @@ rule ensure_critical_stores_are_protected {
 // USER CODE
 // ═══════════════════════════════════════════════════════════════════
 
-// design observation: rules add evidence to the graph,
-// which triggers other rules to derive further facts.
-// this decouples framework policies from vendor specifics -
-// the framework can require data protection for critical stores
-// without understanding tagging, CFN, AWS Services, or S3 replication.
+namespace my {
+	@#doc(
+		tldr = "Classify data sensitivity for security controls",
+		why = "Sensitivity classification drives encryption, access control, and audit requirements. For example, website assets don't need encryption, whilst healthcare records need encryption and restricted access."
+	)
+	enum DataSensitivity {
+		Public,
+		Internal,
+		Confidential,
+		Restricted
+	}
 
-@#doc(
-	 tldr = "Classify data sensitivity for security controls",
-	 why = "Sensitivity classification drives encryption, access control, and audit requirements. For example, website assets don't need encryption, whilst healthcare records need encryption and restricted access."
-)
-enum DataSensitivity {
-	 Public,
-	 Internal,
-	 Confidential,
-	 Restricted
+	@#doc(
+		tldr = "Classify data criticality for protection controls",
+		why = "Criticality classification drives backup and recovery requirements. Easily recreated data doesn't need backing up, whilst employment records need protection against loss."
+	)
+	enum DataCriticality {
+		Disposable,
+		NonCritical,
+		Important,
+		BusinessCritical,
+		MissionCritical
+	}
+
+	rule evidence_store_sensitivity_aws_cfn_tagging {
+		let stores = ?(core:Store)
+
+		*(store in stores, {
+			let source = ?(store/core:source)
+			
+			must ?(source/aws:Tags/*[aws:Key = "DataSensitivity"]) {
+				subject: source,
+				area: my:DataSensitivity,
+				message: "Add a DataSensitivity tag to this resource"
+			}
+
+			let evidence = +(_, wa2:type, core:Evidence)
+			+(store, wa2:contains, evidence)
+			let fact = +(_, wa2:type, data:Sensitivity)
+			+(evidence, wa2:contains, fact)
+		})
+	}
+
+	rule evidence_store_criticality_aws_cfn_tagging {
+		let stores = ?(core:Store)
+
+		*(store in stores, {
+			let source = ?(store/core:source)
+			
+			must ?(source/aws:Tags/*[aws:Key = "DataCriticality"]) {
+				subject: source,
+				area: my:DataCriticality,
+				message: "Add a DataCriticality tag to this resource"
+			}
+
+			let evidence = +(_, wa2:type, core:Evidence)
+			+(store, wa2:contains, evidence)
+			let fact = +(_, wa2:type, data:Criticality)
+			+(evidence, wa2:contains, fact)
+		})
+	}
+
+	rule evidence_store_resilience_aws_cfn_s3 {
+		let replicated_stores = ?(cfn:Resource[aws:type = "AWS::S3::Bucket"][
+			aws:VersioningConfiguration/aws:Status = "Enabled"
+		][
+			aws:ReplicationConfiguration/aws:Role
+		][
+			aws:ReplicationConfiguration/aws:Rules/*/aws:Status = "Enabled"
+		]/core:Store)
+
+		*(store in replicated_stores, {
+			let evidence = +(_, wa2:type, core:Evidence)
+			+(store, wa2:contains, evidence)
+
+			let fact = +(_, wa2:type, data:isResilient)
+			+(evidence, wa2:contains, fact)
+		})
+	}
 }
-
-@#doc(
-	 tldr = "Classify data criticality for protection controls",
-	 why = "Criticality classification drives backup and recovery requirements. Easily recreated data doesn't need backing up, whilst employment records need protection against loss."
-)
-enum DataCriticality {
-	 Disposable,
-	 NonCritical,
-	 Important,
-	 BusinessCritical,
-	 MissionCritical
-}
-
-rule ensure_stores_have_sensitivity_tag {
-	let stores = ?(//core:Store)
-
-	*(store in stores, {
-		let source = ?(store/core:source)
-		
-		must ?(source/aws:Tags/*[aws:Key = "DataSensitivity"]) {
-			subject: source,
-			area: core:DataSensitivity,
-			message: "Add a DataSensitivity tag to this resource"
-		}
-
-		let evidence = +(_, wa2:type, core:Evidence)
-		+(store, wa2:contains, evidence)
-		let fact = +(_, wa2:type, data:Sensitivity)
-		+(evidence, wa2:contains, fact)
-	})
-}
-
-rule ensure_stores_have_criticality_tag {
-	let stores = ?(//core:Store)
-
-	*(store in stores, {
-		let source = ?(store/core:source)
-
-		must ?(source/aws:Tags/*[aws:Key = "DataCriticality"]) {
-			subject: source,
-			area: core:DataCriticality,
-			message: "Add a DataCriticality tag to this resource"
-		}
-
-		let evidence = +(_, wa2:type, core:Evidence)
-		+(store, wa2:contains, evidence)
-		let fact = +(_, wa2:type, data:Criticality)
-		+(evidence, wa2:contains, fact)
-	})
-}
-
-//
-//rule evaluate_aws_cfn_stores {
-//	let cfn_resources = ?(//cfn:Resource)
-//
-//	*(cfn_resource in cfn_resources, {
-//		let dc_tag = ?(cfn_resource/aws:Tags[aws:Key = 'DataCriticality']/aws:Value)
-//		
-//		// ~() converts in a mode (strict or lazy) from a value into destination type
-//		// in this case "strict" means it we cause a assert failure if any problems
-//		let is_critical = ~(strict, dc_tag, DataCriticalityTagging {
-//			MissionCritical, BusinessCritical => true,
-//			_ => false,
-//		})
-//
-//		let store = ?(cfn_resource/core:Store)
-//		let evidence = +(_, wa2:type, core:Evidence)
-//		+(store, wa2:contains, evidence)
-//
-//		let fact = +(_, wa2:type, data:Criticality)
-//		+(evidence, wa2:contains, fact)
-//		how do we only add if is_critical true?
-//	})
-//}
-//
-
-
-rule evaluate_aws_s3_resilience {
-	 let replicated_stores = ?(//cfn:Resource[aws:type = "AWS::S3::Bucket"][
-		  aws:VersioningConfiguration/aws:Status = "Enabled"
-	 ][
-		  aws:ReplicationConfiguration/aws:Role
-	 ][
-		  aws:ReplicationConfiguration/aws:Rules/*/aws:Status = "Enabled"
-	 ]/core:Store)
-
-	 *(store in replicated_stores, {
-		  let evidence = +(_, wa2:type, core:Evidence)
-		  +(store, wa2:contains, evidence)
-
-		  let fact = +(_, wa2:type, data:Resilience)
-		  +(evidence, wa2:contains, fact)
-	 })
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// GOVERNANCE (loaded by enterprise, not developers)
-// ═══════════════════════════════════════════════════════════════════
-
-//governance production {
-//	setting gdpr:minimum_age = 16
-//	
-//	must protect_critical_data
-//	should cost_optimization
-//}
