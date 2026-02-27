@@ -56,8 +56,8 @@ Failed: stack does not satisfy intent.
 
 Causes:
 ✖ require_classification.classified
- - Resource: DataBucket
- - Message: Add a DataCriticality tag to this resource
+ - Subject: DataBucket
+ - Message: Resource must be classified
 ```
 
 WA2 is not checking for a specific tag.
