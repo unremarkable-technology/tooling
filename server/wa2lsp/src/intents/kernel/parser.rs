@@ -1,7 +1,9 @@
 //! Recursive descent parser for WA2 language
 
+use std::collections::HashSet;
+
 use crate::intents::kernel::ast::*;
-use crate::intents::kernel::lexer::{LogosLexer, Token};
+use crate::intents::kernel::lexer::{LogosLexer, Token, Wa2Source};
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -9,20 +11,34 @@ pub struct ParseError {
 	pub span: Span,
 }
 
+/// Resolver function type - returns true if the name is a namespace
+pub type Resolver<'a> = Box<dyn Fn(&str) -> bool + 'a>;
+
+/// Default resolver that never resolves (for simple parsing)
+pub fn no_resolver() -> Resolver<'static> {
+	Box::new(|_| false)
+}
+
 pub struct Parser<'src> {
 	lexer: LogosLexer<'src>,
 	current: Option<Token>,
 	span: Span,
+	resolver: Resolver<'src>,
+	declared_namespaces: HashSet<String>,
+	namespace_stack: Vec<String>,
 }
 
 impl<'src> Parser<'src> {
-	pub fn new(mut lexer: LogosLexer<'src>) -> Self {
+	pub fn new(mut lexer: LogosLexer<'src>, resolver: Resolver<'src>) -> Self {
 		let current = lexer.next().and_then(|r| r.ok());
 		let span = lexer.span();
 		Self {
 			lexer,
 			current,
 			span,
+			resolver,
+			declared_namespaces: HashSet::new(),
+			namespace_stack: Vec::new(),
 		}
 	}
 
@@ -130,11 +146,46 @@ impl<'src> Parser<'src> {
 	fn at_ident(&self) -> bool {
 		matches!(self.current, Some(Token::Ident(_)))
 	}
+
+	/// Check if a name is a known namespace (from resolver or declared in this file)
+	fn is_namespace(&self, name: &str) -> bool {
+		(self.resolver)(name) || self.declared_namespaces.contains(name)
+	}
+
+	/// Get the current namespace path (for nested namespace declarations)
+	fn current_namespace_path(&self) -> String {
+		self.namespace_stack.join(":")
+	}
+
+	/// Compute full namespace path for a new namespace being declared
+	fn full_namespace_path(&self, local_name: &str) -> String {
+		if self.namespace_stack.is_empty() {
+			local_name.to_string()
+		} else {
+			format!("{}:{}", self.current_namespace_path(), local_name)
+		}
+	}
 }
 
-/// Parse a WA2 source into an AST
+/// Parse a WA2 source into an AST (without resolver - for tests)
 pub fn parse(lexer: LogosLexer) -> Result<Ast, ParseError> {
-	let mut parser = Parser::new(lexer);
+	parse_with_resolver(lexer, no_resolver())
+}
+
+/// Parse from source string with model resolver
+pub fn parse_with_model<'src>(
+	source: &'src Wa2Source<'src>,
+	resolver: Resolver<'src>,
+) -> Result<Ast, ParseError> {
+	parse_with_resolver(source.lexer(), resolver)
+}
+
+/// Parse a WA2 source into an AST with a resolver for namespaces
+pub fn parse_with_resolver<'a>(
+	lexer: LogosLexer<'a>,
+	resolver: Resolver<'a>,
+) -> Result<Ast, ParseError> {
+	let mut parser = Parser::new(lexer, resolver);
 	let mut items = Vec::new();
 
 	while parser.current.is_some() {
@@ -262,6 +313,14 @@ fn parse_namespace(p: &mut Parser) -> Result<Namespace, ParseError> {
 	let start = p.span.start;
 	p.expect(Token::KwNamespace)?;
 	let name = p.expect_ident()?;
+
+	// Register this namespace before parsing contents
+	let full_path = p.full_namespace_path(&name);
+	p.declared_namespaces.insert(full_path);
+
+	// Push onto stack for nested namespaces
+	p.namespace_stack.push(name.clone());
+
 	p.expect(Token::LBrace)?;
 
 	let mut items = Vec::new();
@@ -270,6 +329,9 @@ fn parse_namespace(p: &mut Parser) -> Result<Namespace, ParseError> {
 	}
 
 	p.expect(Token::RBrace)?;
+
+	// Pop from stack
+	p.namespace_stack.pop();
 
 	Ok(Namespace {
 		name,
@@ -816,19 +878,6 @@ fn parse_match_pattern(p: &mut Parser) -> Result<MatchPattern, ParseError> {
 	}
 }
 
-fn parse_query_expr(p: &mut Parser) -> Result<Expr, ParseError> {
-	let start = p.span.start;
-	p.expect(Token::Question)?;
-	p.expect(Token::LParen)?;
-	let path = parse_query_path(p)?;
-	p.expect(Token::RParen)?;
-
-	Ok(Expr::Query(QueryExpr {
-		path,
-		span: start..p.span.end,
-	}))
-}
-
 fn parse_query_path(p: &mut Parser) -> Result<QueryPath, ParseError> {
 	let start = p.span.start;
 	let mut steps = Vec::new();
@@ -976,22 +1025,55 @@ fn parse_query_path_inline(p: &mut Parser) -> Result<QueryPath, ParseError> {
 	})
 }
 
+/// Parse qualified name using resolver to determine namespace depth
 fn parse_qualified_name(p: &mut Parser) -> Result<QualifiedName, ParseError> {
 	let start = p.span.start;
 	let first = p.expect_name()?;
 
-	if p.at(&Token::Colon) {
-		p.advance();
+	if !p.at(&Token::Colon) {
+		// Simple name, no namespace
+		return Ok(QualifiedName {
+			namespace: None,
+			name: first,
+			span: start..p.span.end,
+		});
+	}
+
+	// We have at least one colon - check if first part is a namespace
+	if p.is_namespace(&first) {
+		// It's a namespace, consume more parts while they're namespaces
+		let mut namespace_parts = vec![first];
+
+		while p.at(&Token::Colon) {
+			p.advance(); // consume :
+			let next = p.expect_name()?;
+			let candidate = format!("{}:{}", namespace_parts.join(":"), next);
+
+			if p.at(&Token::Colon) && p.is_namespace(&candidate) {
+				// Still a namespace, continue
+				namespace_parts.push(next);
+			} else {
+				// Not a namespace, this is the final name
+				return Ok(QualifiedName {
+					namespace: Some(namespace_parts.join(":")),
+					name: next,
+					span: start..p.span.end,
+				});
+			}
+		}
+
+		// Consumed all parts as namespaces - error, need a final name
+		Err(ParseError {
+			message: "expected name after namespace".to_string(),
+			span: p.span.clone(),
+		})
+	} else {
+		// First part is not a namespace, treat as simple 2-part qualified name
+		p.advance(); // consume :
 		let second = p.expect_name()?;
 		Ok(QualifiedName {
 			namespace: Some(first),
 			name: second,
-			span: start..p.span.end,
-		})
-	} else {
-		Ok(QualifiedName {
-			namespace: None,
-			name: first,
 			span: start..p.span.end,
 		})
 	}
@@ -1116,9 +1198,163 @@ mod tests {
 	}
 
 	#[test]
+	fn parse_nested_namespace_declared_in_file() {
+		let src = r#"
+namespace aws {
+	namespace cfn {
+		type Resource
+	}
+}
+
+rule test {
+	let x = query(aws:cfn:Resource)
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		assert_eq!(ast.items.len(), 2);
+
+		// Check the rule parsed the nested namespace correctly
+		match &ast.items[1] {
+			Item::Rule(r) => {
+				assert_eq!(r.name, "test");
+				match &r.body[0] {
+					Statement::Let(let_stmt) => match &let_stmt.value {
+						Expr::Query(q) => {
+							let qname = q.path.steps[0].node_test.as_ref().unwrap();
+							assert_eq!(qname.namespace, Some("aws:cfn".to_string()));
+							assert_eq!(qname.name, "Resource");
+						}
+						_ => panic!("expected query"),
+					},
+					_ => panic!("expected let"),
+				}
+			}
+			_ => panic!("expected rule"),
+		}
+	}
+
+	#[test]
+	fn parse_nested_namespace_with_resolver() {
+		let src = r#"
+rule test {
+	let x = query(aws:cfn:Resource)
+}
+"#;
+		let source = Wa2Source::from_str(src);
+
+		// Create resolver that knows about aws and aws:cfn namespaces (from model)
+		let resolver: Resolver = Box::new(|name| matches!(name, "aws" | "aws:cfn"));
+
+		let ast = parse_with_resolver(source.lexer(), resolver).unwrap();
+
+		assert_eq!(ast.items.len(), 1);
+		match &ast.items[0] {
+			Item::Rule(r) => {
+				assert_eq!(r.name, "test");
+				match &r.body[0] {
+					Statement::Let(let_stmt) => match &let_stmt.value {
+						Expr::Query(q) => {
+							let qname = q.path.steps[0].node_test.as_ref().unwrap();
+							assert_eq!(qname.namespace, Some("aws:cfn".to_string()));
+							assert_eq!(qname.name, "Resource");
+						}
+						_ => panic!("expected query"),
+					},
+					_ => panic!("expected let"),
+				}
+			}
+			_ => panic!("expected rule"),
+		}
+	}
+
+	#[test]
+	fn parse_instance_with_resolver() {
+		let src = r#"instance core:workload: core:Workload"#;
+		let source = Wa2Source::from_str(src);
+
+		// Resolver knows core is a namespace
+		let resolver: Resolver = Box::new(|name| name == "core");
+
+		let ast = parse_with_resolver(source.lexer(), resolver).unwrap();
+
+		assert_eq!(ast.items.len(), 1);
+		match &ast.items[0] {
+			Item::Instance(i) => {
+				assert_eq!(i.name.namespace, Some("core".to_string()));
+				assert_eq!(i.name.name, "workload");
+				assert_eq!(i.ty.namespace, Some("core".to_string()));
+				assert_eq!(i.ty.name, "Workload");
+			}
+			_ => panic!("expected instance"),
+		}
+	}
+
+	#[test]
+	fn parse_query_path_with_nested_namespace() {
+		let src = r#"
+namespace aws {
+	namespace cfn {
+		type Resource
+	}
+}
+namespace core {
+	predicate source
+	type Store
+}
+
+rule test {
+	let x = query(core:Store[core:source/aws:cfn:Resource])
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		// Items: 0=aws namespace, 1=core namespace, 2=rule test
+		match &ast.items[2] {
+			Item::Rule(r) => match &r.body[0] {
+				Statement::Let(let_stmt) => match &let_stmt.value {
+					Expr::Query(q) => {
+						// First step: core:Store
+						let step0 = &q.path.steps[0];
+						let qname0 = step0.node_test.as_ref().unwrap();
+						assert_eq!(qname0.namespace, Some("core".to_string()));
+						assert_eq!(qname0.name, "Store");
+
+						// Predicate path: core:source/aws:cfn:Resource
+						let pred = &step0.predicates[0];
+						match pred {
+							QueryPredicate::Exists(path) => {
+								// First step in predicate: core:source
+								let ps0 = &path.steps[0];
+								let pqn0 = ps0.node_test.as_ref().unwrap();
+								assert_eq!(pqn0.namespace, Some("core".to_string()));
+								assert_eq!(pqn0.name, "source");
+
+								// Second step in predicate: aws:cfn:Resource
+								let ps1 = &path.steps[1];
+								let pqn1 = ps1.node_test.as_ref().unwrap();
+								assert_eq!(pqn1.namespace, Some("aws:cfn".to_string()));
+								assert_eq!(pqn1.name, "Resource");
+							}
+							_ => panic!("expected exists predicate"),
+						}
+					}
+					_ => panic!("expected query"),
+				},
+				_ => panic!("expected let"),
+			},
+			_ => panic!("expected rule"),
+		}
+	}
+
+	#[test]
 	fn parse_bootstrap() {
 		let src = include_str!("../../../../../wa2/core/v0.1/bootstrap.wa2");
 		let source = Wa2Source::from_str(src);
+
+		// For bootstrap, namespaces are declared in the file itself
 		let ast = parse(source.lexer());
 
 		match ast {
@@ -1147,6 +1383,9 @@ mod tests {
 	#[test]
 	fn parse_path_with_wildcard() {
 		let src = r#"
+namespace core {}
+namespace aws {}
+
 rule test {
 	let x = query(core:Store[core:source/aws:Rules/*/aws:Status = "Enabled"])
 }
@@ -1169,5 +1408,234 @@ rule test {
 		for (i, tok) in lex.enumerate() {
 			eprintln!("{}: {:?}", i, tok);
 		}
+	}
+
+	#[test]
+	fn compare_query_parsing_with_and_without_predicate() {
+		// Query that works
+		let src1 = r#"
+namespace core {}
+namespace aws { namespace cfn {} }
+
+rule test {
+    let stores = query(core:Store)
+}
+"#;
+
+		// Query that doesn't work
+		let src2 = r#"
+namespace core {}
+namespace aws { namespace cfn {} }
+
+rule test {
+    let stores = query(core:Store[core:source/aws:cfn:Resource])
+}
+"#;
+
+		let source1 = Wa2Source::from_str(src1);
+		let ast1 = parse(source1.lexer()).unwrap();
+
+		let source2 = Wa2Source::from_str(src2);
+		let ast2 = parse(source2.lexer()).unwrap();
+
+		eprintln!("=== Query without predicate ===");
+		if let Item::Rule(r) = &ast1.items[2] {
+			if let Statement::Let(l) = &r.body[0] {
+				if let Expr::Query(q1) = &l.value {
+					eprintln!("Steps: {}", q1.path.steps.len());
+					for (i, step) in q1.path.steps.iter().enumerate() {
+						let name = step
+							.node_test
+							.as_ref()
+							.map(|n| n.to_string())
+							.unwrap_or("*".to_string());
+						eprintln!(
+							"  Step {}: {} (predicates: {})",
+							i,
+							name,
+							step.predicates.len()
+						);
+					}
+				}
+			}
+		}
+
+		eprintln!("\n=== Query with predicate ===");
+		if let Item::Rule(r) = &ast2.items[2] {
+			if let Statement::Let(l) = &r.body[0] {
+				if let Expr::Query(q2) = &l.value {
+					eprintln!("Steps: {}", q2.path.steps.len());
+					for (i, step) in q2.path.steps.iter().enumerate() {
+						let name = step
+							.node_test
+							.as_ref()
+							.map(|n| n.to_string())
+							.unwrap_or("*".to_string());
+						eprintln!(
+							"  Step {}: {} (predicates: {})",
+							i,
+							name,
+							step.predicates.len()
+						);
+
+						for (j, pred) in step.predicates.iter().enumerate() {
+							match pred {
+								QueryPredicate::Exists(path) => {
+									eprintln!("    Predicate {}: Exists", j);
+									for (k, pstep) in path.steps.iter().enumerate() {
+										let pname = pstep
+											.node_test
+											.as_ref()
+											.map(|n| {
+												format!("ns={:?} name={}", n.namespace, n.name)
+											})
+											.unwrap_or("*".to_string());
+										eprintln!("      Path step {}: {}", k, pname);
+									}
+								}
+								QueryPredicate::Eq(path, val) => {
+									eprintln!("    Predicate {}: Eq({:?})", j, val);
+									for (k, pstep) in path.steps.iter().enumerate() {
+										let pname = pstep
+											.node_test
+											.as_ref()
+											.map(|n| {
+												format!("ns={:?} name={}", n.namespace, n.name)
+											})
+											.unwrap_or("*".to_string());
+										eprintln!("      Path step {}: {}", k, pname);
+									}
+								}
+								QueryPredicate::In(path, vals) => {
+									eprintln!("    Predicate {}: In({:?})", j, vals);
+									for (k, pstep) in path.steps.iter().enumerate() {
+										let pname = pstep
+											.node_test
+											.as_ref()
+											.map(|n| {
+												format!("ns={:?} name={}", n.namespace, n.name)
+											})
+											.unwrap_or("*".to_string());
+										eprintln!("      Path step {}: {}", k, pname);
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn test_query_with_nested_namespace_predicate() {
+		use crate::intents::kernel::ast::*;
+		use crate::intents::kernel::query::QueryEngine;
+		use crate::intents::model::Model;
+
+		// Build a model with the structure we expect
+		let mut model = Model::bootstrap();
+
+		// Create namespaces
+		model.ensure_namespace("core").unwrap();
+		model.ensure_namespace("aws").unwrap();
+		model.ensure_namespace("aws:cfn").unwrap();
+
+		// Create types
+		model.apply("core:Store", "wa2:type", "wa2:Type").unwrap();
+		model
+			.apply("aws:cfn:Resource", "wa2:type", "wa2:Type")
+			.unwrap();
+		model
+			.apply("core:source", "wa2:type", "wa2:Predicate")
+			.unwrap();
+
+		// Create a workload as root
+		let workload = model.ensure_entity("core:workload").unwrap();
+		model
+			.apply_to(workload, "wa2:type", "core:Workload")
+			.unwrap();
+		model.set_root(workload);
+
+		// Create a CFN resource
+		let bucket = model.ensure_entity("Bucket1").unwrap();
+		model
+			.apply_to(bucket, "wa2:type", "aws:cfn:Resource")
+			.unwrap();
+
+		// Create a Store that points to the CFN resource
+		let store = model.blank();
+		model.apply_to(store, "wa2:type", "core:Store").unwrap();
+		model.apply_entity(store, "core:source", bucket).unwrap();
+		model.apply_entity(workload, "wa2:contains", store).unwrap();
+
+		eprintln!("Model:\n{}", model);
+
+		let engine = QueryEngine::new();
+
+		// Test 1: Simple query for core:Store (should work)
+		let path1 = QueryPath {
+			steps: vec![QueryStep {
+				axis: Axis::Child,
+				node_test: Some(QualifiedName {
+					namespace: Some("core".to_string()),
+					name: "Store".to_string(),
+					span: 0..0,
+				}),
+				predicates: vec![],
+				span: 0..0,
+			}],
+			span: 0..0,
+		};
+
+		let results1 = engine.execute(&model, &path1).unwrap();
+		eprintln!("Query core:Store => {} results", results1.len());
+		assert_eq!(results1.len(), 1, "Should find 1 Store");
+
+		// Test 2: Query with predicate for core:source/aws:cfn:Resource
+		let path2 = QueryPath {
+			steps: vec![QueryStep {
+				axis: Axis::Child,
+				node_test: Some(QualifiedName {
+					namespace: Some("core".to_string()),
+					name: "Store".to_string(),
+					span: 0..0,
+				}),
+				predicates: vec![QueryPredicate::Exists(QueryPath {
+					steps: vec![
+						QueryStep {
+							axis: Axis::Child,
+							node_test: Some(QualifiedName {
+								namespace: Some("core".to_string()),
+								name: "source".to_string(),
+								span: 0..0,
+							}),
+							predicates: vec![],
+							span: 0..0,
+						},
+						QueryStep {
+							axis: Axis::Child,
+							node_test: Some(QualifiedName {
+								namespace: Some("aws:cfn".to_string()),
+								name: "Resource".to_string(),
+								span: 0..0,
+							}),
+							predicates: vec![],
+							span: 0..0,
+						},
+					],
+					span: 0..0,
+				})],
+				span: 0..0,
+			}],
+			span: 0..0,
+		};
+
+		let results2 = engine.execute(&model, &path2).unwrap();
+		eprintln!(
+			"Query core:Store[core:source/aws:cfn:Resource] => {} results",
+			results2.len()
+		);
+		assert_eq!(results2.len(), 1, "Should find 1 Store with predicate");
 	}
 }

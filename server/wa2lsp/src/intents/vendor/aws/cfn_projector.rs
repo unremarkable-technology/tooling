@@ -79,7 +79,7 @@ pub fn ensure_core_types(model: &mut Model) -> Result<(), ModelError> {
 	// Predicates
 	model.apply("core:source", "wa2:type", "wa2:Predicate")?;
 	model.apply("core:source", "wa2:domain", "core:Node")?;
-	model.apply("core:source", "wa2:range", "cfn:Resource")?;
+	model.apply("core:source", "wa2:range", "aws:cfn:Resource")?;
 
 	Ok(())
 }
@@ -95,26 +95,26 @@ pub fn ensure_aws_types(model: &mut Model) -> Result<(), ModelError> {
 pub fn ensure_cfn_types(model: &mut Model) -> Result<(), ModelError> {
 	model.ensure_namespace("aws")?; // Parent first
 	model.ensure_namespace("aws:cfn")?; // Nested namespace
-   
-	model.ensure_entity("cfn:Output")?;
-	model.ensure_entity("cfn:Resource")?;
-	model.ensure_entity("cfn:outputs")?;
-	model.ensure_entity("cfn:resources")?;
-	model.ensure_entity("cfn:value")?;
-	model.ensure_entity("cfn:exportName")?;
-	model.ensure_entity("cfn:SubVarRef")?;
-	model.ensure_entity("cfn:varRef")?;
 
-	model.apply("cfn:Template", "wa2:type", "wa2:Type")?;
-	model.apply("cfn:Parameter", "wa2:type", "wa2:Type")?;
-	model.apply("cfn:PseudoParameter", "wa2:type", "wa2:Type")?;
-	model.apply("cfn:Resource", "wa2:type", "wa2:Type")?;
+	model.ensure_entity("aws:cfn:Output")?;
+	model.ensure_entity("aws:cfn:Resource")?;
+	model.ensure_entity("aws:cfn:outputs")?;
+	model.ensure_entity("aws:cfn:resources")?;
+	model.ensure_entity("aws:cfn:value")?;
+	model.ensure_entity("aws:cfn:exportName")?;
+	model.ensure_entity("aws:cfn:SubVarRef")?;
+	model.ensure_entity("aws:cfn:varRef")?;
+
+	model.apply("aws:cfn:Template", "wa2:type", "wa2:Type")?;
+	model.apply("aws:cfn:Parameter", "wa2:type", "wa2:Type")?;
+	model.apply("aws:cfn:PseudoParameter", "wa2:type", "wa2:Type")?;
+	model.apply("aws:cfn:Resource", "wa2:type", "wa2:Type")?;
 	for name in CFN_INTRINSICS {
-		model.apply(&format!("cfn:{}", name), "wa2:type", "wa2:Type")?;
+		model.apply(&format!("aws:cfn:{}", name), "wa2:type", "wa2:Type")?;
 	}
 
 	for name in CFN_PREDICATES {
-		model.apply(&format!("cfn:{}", name), "wa2:type", "wa2:Predicate")?;
+		model.apply(&format!("aws:cfn:{}", name), "wa2:type", "wa2:Predicate")?;
 	}
 
 	Ok(())
@@ -129,7 +129,7 @@ fn project_intrinsic(
 ) -> Result<EntityId, ModelError> {
 	let name = value.intrinsic_name().expect("must be intrinsic");
 	let node = model.blank();
-	model.apply_to(node, "wa2:type", &format!("cfn:{}", name))?;
+	model.apply_to(node, "wa2:type", &format!("aws:cfn:{}", name))?;
 	model.set_range(node, value.range());
 	model.apply_entity(parent, pred, node)?;
 	Ok(node)
@@ -175,7 +175,7 @@ pub fn project_value(
 		CfnValue::Ref { target, .. } => {
 			let node = project_intrinsic(model, parent, &pred, value)?;
 			let target_entity = model.ensure_raw(target);
-			model.apply_entity(node, "cfn:target", target_entity)?;
+			model.apply_entity(node, "aws:cfn:target", target_entity)?;
 		}
 
 		CfnValue::GetAtt {
@@ -183,8 +183,8 @@ pub fn project_value(
 		} => {
 			let node = project_intrinsic(model, parent, &pred, value)?;
 			let target_entity = model.ensure_raw(target);
-			model.apply_entity(node, "cfn:target", target_entity)?;
-			model.apply_to(node, "cfn:attribute", &format!("\"{}\"", attribute))?;
+			model.apply_entity(node, "aws:cfn:target", target_entity)?;
+			model.apply_to(node, "aws:cfn:attribute", &format!("\"{}\"", attribute))?;
 		}
 
 		CfnValue::Sub {
@@ -196,13 +196,13 @@ pub fn project_value(
 
 			// Get template string content
 			if let CfnValue::String(template_str, _) = template.as_ref() {
-				model.apply_to(node, "cfn:template", &format!("\"{}\"", template_str))?;
+				model.apply_to(node, "aws:cfn:template", &format!("\"{}\"", template_str))?;
 
 				// Create per-variable reference nodes with source ranges
 				let var_positions = extract_sub_variable_positions(template_str);
 				let cfn_sub_var_ref = model
-					.resolve("cfn:SubVarRef")
-					.expect("cfn:SubVarRef must exist");
+					.resolve("aws:cfn:SubVarRef")
+					.expect("aws:cfn:SubVarRef must exist");
 
 				for (var_name, start_offset, end_offset) in var_positions {
 					// Use the Sub's range as the base
@@ -221,11 +221,11 @@ pub fn project_value(
 					let ref_node = model.blank();
 					model.apply_entity(ref_node, "wa2:type", cfn_sub_var_ref)?;
 					model.set_range(ref_node, var_range);
-					model.apply_entity(node, "cfn:varRef", ref_node)?;
+					model.apply_entity(node, "aws:cfn:varRef", ref_node)?;
 
 					// Link to target
 					if let Some(target) = model.resolve(&var_name) {
-						model.apply_entity(ref_node, "cfn:target", target)?;
+						model.apply_entity(ref_node, "aws:cfn:target", target)?;
 					}
 				}
 			}
@@ -233,7 +233,7 @@ pub fn project_value(
 			// Handle explicit variables map if present
 			if let Some(vars) = variables {
 				for (var_name, var_value) in vars {
-					project_value(model, node, &format!("cfn:var:{}", var_name), var_value)?;
+					project_value(model, node, &format!("aws:cfn:var:{}", var_name), var_value)?;
 				}
 			}
 		}
@@ -242,7 +242,7 @@ pub fn project_value(
 			delimiter, values, ..
 		} => {
 			let node = project_intrinsic(model, parent, &pred, value)?;
-			model.apply_to(node, "cfn:delimiter", &format!("\"{}\"", delimiter))?;
+			model.apply_to(node, "aws:cfn:delimiter", &format!("\"{}\"", delimiter))?;
 			project_value(model, node, "values", values)?;
 		}
 
@@ -253,7 +253,11 @@ pub fn project_value(
 			..
 		} => {
 			let node = project_intrinsic(model, parent, &pred, value)?;
-			model.apply_to(node, "cfn:condition", &format!("\"{}\"", condition_name))?;
+			model.apply_to(
+				node,
+				"aws:cfn:condition",
+				&format!("\"{}\"", condition_name),
+			)?;
 			project_value(model, node, "then", value_if_true)?;
 			project_value(model, node, "else", value_if_false)?;
 		}
@@ -278,7 +282,7 @@ pub fn project_value(
 			delimiter, source, ..
 		} => {
 			let node = project_intrinsic(model, parent, &pred, value)?;
-			model.apply_to(node, "cfn:delimiter", &format!("\"{}\"", delimiter))?;
+			model.apply_to(node, "aws:cfn:delimiter", &format!("\"{}\"", delimiter))?;
 			project_value(model, node, "source", source)?;
 		}
 
@@ -357,7 +361,7 @@ pub fn project_value(
 		CfnValue::And { conditions, .. } => {
 			let node = project_intrinsic(model, parent, &pred, value)?;
 			let container = model.blank();
-			model.apply_entity(node, "cfn:conditions", container)?;
+			model.apply_entity(node, "aws:cfn:conditions", container)?;
 			for cond in conditions {
 				project_array_item(model, container, cond)?;
 			}
@@ -366,7 +370,7 @@ pub fn project_value(
 		CfnValue::Or { conditions, .. } => {
 			let node = project_intrinsic(model, parent, &pred, value)?;
 			let container = model.blank();
-			model.apply_entity(node, "cfn:conditions", container)?;
+			model.apply_entity(node, "aws:cfn:conditions", container)?;
 			for cond in conditions {
 				project_array_item(model, container, cond)?;
 			}
@@ -376,7 +380,7 @@ pub fn project_value(
 			let node = project_intrinsic(model, parent, &pred, value)?;
 			model.apply_to(
 				node,
-				"cfn:conditionName",
+				"aws:cfn:conditionName",
 				&format!("\"{}\"", condition_name),
 			)?;
 		}
@@ -428,20 +432,20 @@ fn project_array_item(
 			let item = model.blank();
 			model.apply_entity(container, "wa2:contains", item)?;
 			if let Some(name) = other.intrinsic_name() {
-				model.apply_to(item, "wa2:type", &format!("cfn:{}", name))?;
+				model.apply_to(item, "wa2:type", &format!("aws:cfn:{}", name))?;
 				model.set_range(item, other.range());
 
 				match other {
 					CfnValue::Ref { target, .. } => {
 						let target_entity = model.ensure_raw(target);
-						model.apply_entity(item, "cfn:target", target_entity)?;
+						model.apply_entity(item, "aws:cfn:target", target_entity)?;
 					}
 					CfnValue::GetAtt {
 						target, attribute, ..
 					} => {
 						let target_entity = model.ensure_raw(target);
-						model.apply_entity(item, "cfn:target", target_entity)?;
-						model.apply_to(item, "cfn:attribute", &format!("\"{}\"", attribute))?;
+						model.apply_entity(item, "aws:cfn:target", target_entity)?;
+						model.apply_to(item, "aws:cfn:attribute", &format!("\"{}\"", attribute))?;
 					}
 					CfnValue::Sub {
 						template,
@@ -449,14 +453,15 @@ fn project_array_item(
 						..
 					} => {
 						if let Some(s) = template.as_str() {
-							model.apply_to(item, "cfn:template", &format!("\"{}\"", s))?;
+							model.apply_to(item, "aws:cfn:template", &format!("\"{}\"", s))?;
 							for (var_name, _, _) in extract_sub_variable_positions(s) {
 								let target_entity = model.ensure_raw(&var_name);
-								model.apply_entity(item, "cfn:target", target_entity)?;
+								model.apply_entity(item, "aws:cfn:target", target_entity)?;
 							}
 						}
 						if let Some(vars) = variables {
 							for (var_name, var_value) in vars {
+								// project_value adds "aws:" prefix
 								project_value(model, item, var_name, var_value)?;
 							}
 						}
@@ -464,7 +469,7 @@ fn project_array_item(
 					CfnValue::Join {
 						delimiter, values, ..
 					} => {
-						model.apply_to(item, "cfn:delimiter", &format!("\"{}\"", delimiter))?;
+						model.apply_to(item, "aws:cfn:delimiter", &format!("\"{}\"", delimiter))?;
 						project_value(model, item, "values", values)?;
 					}
 					CfnValue::If {
@@ -475,7 +480,7 @@ fn project_array_item(
 					} => {
 						model.apply_to(
 							item,
-							"cfn:condition",
+							"aws:cfn:condition",
 							&format!("\"{}\"", condition_name),
 						)?;
 						project_value(model, item, "then", value_if_true)?;
@@ -494,7 +499,7 @@ fn project_array_item(
 					CfnValue::Split {
 						delimiter, source, ..
 					} => {
-						model.apply_to(item, "cfn:delimiter", &format!("\"{}\"", delimiter))?;
+						model.apply_to(item, "aws:cfn:delimiter", &format!("\"{}\"", delimiter))?;
 						project_value(model, item, "source", source)?;
 					}
 					CfnValue::ImportValue { name, .. } => {
@@ -553,7 +558,7 @@ fn project_array_item(
 					}
 					CfnValue::And { conditions, .. } | CfnValue::Or { conditions, .. } => {
 						let cond_container = model.blank();
-						model.apply_entity(item, "cfn:conditions", cond_container)?;
+						model.apply_entity(item, "aws:cfn:conditions", cond_container)?;
 						for cond in conditions {
 							project_array_item(model, cond_container, cond)?;
 						}
@@ -561,7 +566,7 @@ fn project_array_item(
 					CfnValue::Condition { condition_name, .. } => {
 						model.apply_to(
 							item,
-							"cfn:conditionName",
+							"aws:cfn:conditionName",
 							&format!("\"{}\"", condition_name),
 						)?;
 					}
@@ -584,14 +589,14 @@ pub fn project_parameters(
 	}
 
 	let params_container = model.blank();
-	model.apply_entity(template_entity, "cfn:parameters", params_container)?;
+	model.apply_entity(template_entity, "aws:cfn:parameters", params_container)?;
 
 	for (name, param) in parameters {
 		let param_entity = model.ensure_raw(name);
-		model.apply_to(param_entity, "wa2:type", "cfn:Parameter")?;
+		model.apply_to(param_entity, "wa2:type", "aws:cfn:Parameter")?;
 		model.apply_to(
 			param_entity,
-			"cfn:type",
+			"aws:cfn:type",
 			&format!("\"{}\"", param.parameter_type),
 		)?;
 		model.apply_entity(params_container, "wa2:contains", param_entity)?;
@@ -599,12 +604,16 @@ pub fn project_parameters(
 		model.set_range(param_entity, param.name_range);
 
 		if let Some(ref desc) = param.description {
-			model.apply_to(param_entity, "cfn:description", &format!("\"{}\"", desc))?;
+			model.apply_to(
+				param_entity,
+				"aws:cfn:description",
+				&format!("\"{}\"", desc),
+			)?;
 		}
 
 		if let Some(ref default_val) = param.default_value {
 			if let Some(s) = default_val.as_str() {
-				model.apply_to(param_entity, "cfn:default", &format!("\"{}\"", s))?;
+				model.apply_to(param_entity, "aws:cfn:default", &format!("\"{}\"", s))?;
 			}
 		}
 	}
@@ -618,7 +627,11 @@ pub fn project_pseudo_parameters(
 	template_entity: EntityId,
 ) -> Result<(), ModelError> {
 	let pseudo_container = model.blank();
-	model.apply_entity(template_entity, "cfn:pseudoParameters", pseudo_container)?;
+	model.apply_entity(
+		template_entity,
+		"aws:cfn:pseudoParameters",
+		pseudo_container,
+	)?;
 
 	let pseudo_params = [
 		"AWS::AccountId",
@@ -633,7 +646,7 @@ pub fn project_pseudo_parameters(
 
 	for name in pseudo_params {
 		let pseudo_entity = model.ensure_raw(name);
-		model.apply_to(pseudo_entity, "wa2:type", "cfn:PseudoParameter")?;
+		model.apply_to(pseudo_entity, "wa2:type", "aws:cfn:PseudoParameter")?;
 		model.apply_entity(pseudo_container, "wa2:contains", pseudo_entity)?;
 	}
 
@@ -649,18 +662,21 @@ pub fn project_outputs(
 		return Ok(());
 	}
 
-	let cfn_output = model.resolve("cfn:Output").expect("cfn:Output must exist");
+	let cfn_output = model
+		.resolve("aws:cfn:Output")
+		.expect("aws:cfn:Output must exist");
 
 	let outputs_container = model.blank();
-	model.apply_entity(template_entity, "cfn:outputs", outputs_container)?;
+	model.apply_entity(template_entity, "aws:cfn:outputs", outputs_container)?;
 
 	for output in outputs.values() {
 		let output_entity = model.blank();
-		model.apply_to(output_entity, "cfn:name", &output.name)?;
+		model.apply_to(output_entity, "aws:cfn:name", &output.name)?;
 		model.apply_entity(output_entity, "wa2:type", cfn_output)?;
 		model.set_range(output_entity, output.name_range);
 		model.apply_entity(outputs_container, "wa2:contains", output_entity)?;
 
+		// NOTE: project_value adds "aws:" prefix, so pass "cfn:value" to get "aws:cfn:value"
 		project_value(model, output_entity, "cfn:value", &output.value)?;
 
 		if let Some(ref export_name) = output.export_name {
@@ -683,13 +699,13 @@ pub fn project_resources(
 	}
 
 	let resources_container = model.blank();
-	model.apply_entity(template_entity, "cfn:resources", resources_container)?;
+	model.apply_entity(template_entity, "aws:cfn:resources", resources_container)?;
 
 	let mut entities = Vec::new();
 
 	for resource in resources.values() {
 		let entity = model.ensure_raw(&resource.logical_id);
-		model.apply_to(entity, "wa2:type", "cfn:Resource")?;
+		model.apply_to(entity, "wa2:type", "aws:cfn:Resource")?;
 		model.apply_to(
 			entity,
 			"aws:type",

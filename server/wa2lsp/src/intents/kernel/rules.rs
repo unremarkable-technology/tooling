@@ -418,22 +418,7 @@ impl RuleEngine {
 			Expr::Query(query) => {
 				let engine = QueryEngine::new();
 
-				// Check if the query is just a variable reference (single step, no predicates)
-				if query.path.steps.len() == 1 {
-					if let Some(first_step) = query.path.steps.first() {
-						if first_step.predicates.is_empty() {
-							if let Some(ref node_test) = first_step.node_test {
-								if node_test.namespace.is_none() {
-									if let Some(result) = env.get(&node_test.name) {
-										return Ok(result.clone());
-									}
-								}
-							}
-						}
-					}
-				}
-
-				// Check if the first step is a variable reference with more steps
+				// Check if the first step is a variable reference
 				if let Some(first_step) = query.path.steps.first() {
 					if let Some(ref node_test) = first_step.node_test {
 						let var_name = &node_test.name;
@@ -446,20 +431,34 @@ impl RuleEngine {
 								};
 
 								if !start_entities.is_empty() {
+									// Apply predicates from first step if any
+									let filtered = if !first_step.predicates.is_empty() {
+										let mut result = Vec::new();
+										for &entity in &start_entities {
+											if engine.check_predicates(
+												model,
+												entity,
+												&first_step.predicates,
+											)? {
+												result.push(entity);
+											}
+										}
+										result
+									} else {
+										start_entities
+									};
+
 									let remaining_path = QueryPath {
 										steps: query.path.steps[1..].to_vec(),
 										span: query.path.span.clone(),
 									};
 
 									if remaining_path.steps.is_empty() {
-										return Ok(EvalResult::Set(start_entities));
+										return Ok(EvalResult::Set(filtered));
 									}
 
-									let results = engine.execute_from(
-										model,
-										&start_entities,
-										&remaining_path,
-									)?;
+									let results =
+										engine.execute_from(model, &filtered, &remaining_path)?;
 									return Ok(EvalResult::Set(results));
 								}
 							}
@@ -467,6 +466,7 @@ impl RuleEngine {
 					}
 				}
 
+				// No variable prefix, execute normally
 				let results = engine.execute(model, &query.path)?;
 				Ok(EvalResult::Set(results))
 			}
@@ -531,40 +531,92 @@ impl RuleEngine {
 			}
 
 			Expr::Match(match_expr) => {
-				let value = self.eval_expr(model, &match_expr.value, env)?;
+				// Try to get a literal value for matching
+				let value_str = if let Expr::Query(ref query) = match_expr.value {
+					// Check if first step is a variable
+					if let Some(first_step) = query.path.steps.first() {
+						if let Some(ref node_test) = first_step.node_test {
+							if node_test.namespace.is_none() {
+								if let Some(result) = env.get(&node_test.name) {
+									let start_entities = match result {
+										EvalResult::Entity(id) => vec![*id],
+										EvalResult::Set(ids) => ids.clone(),
+										_ => vec![],
+									};
 
-				let value_str = match &value {
-					EvalResult::Literal(s) => s.clone(),
-					EvalResult::Entity(_) => {
+									if !start_entities.is_empty() && query.path.steps.len() > 1 {
+										let remaining_path = QueryPath {
+											steps: query.path.steps[1..].to_vec(),
+											span: query.path.span.clone(),
+										};
+
+										let engine = QueryEngine::new();
+										let literals = engine.extract_literals(
+											model,
+											&start_entities,
+											&remaining_path,
+										)?;
+
+										if literals.len() == 1 {
+											literals[0].clone()
+										} else if literals.is_empty() {
+											return Ok(EvalResult::Literal("false".to_string()));
+										} else {
+											return Err(RuleError {
+												message: format!(
+													"match requires single value, got {}",
+													literals.len()
+												),
+											});
+										}
+									} else {
+										return Err(RuleError {
+											message: "match on variable without path not supported"
+												.to_string(),
+										});
+									}
+								} else {
+									return Err(RuleError {
+										message: format!(
+											"undefined variable in match: {}",
+											node_test.name
+										),
+									});
+								}
+							} else {
+								return Err(RuleError {
+									message: "match on qualified name not supported".to_string(),
+								});
+							}
+						} else {
+							return Err(RuleError {
+								message: "match query must start with variable".to_string(),
+							});
+						}
+					} else {
 						return Err(RuleError {
-							message: "match on entity not yet supported, use literal value"
-								.to_string(),
+							message: "match query is empty".to_string(),
 						});
 					}
-					EvalResult::Set(_) => {
-						return Err(RuleError {
-							message: "match value must be a single value, not a set".to_string(),
-						});
-					}
-					EvalResult::Empty => {
-						return Err(RuleError {
-							message: "match value is empty".to_string(),
-						});
+				} else {
+					// Not a query - evaluate normally
+					let value = self.eval_expr(model, &match_expr.value, env)?;
+					match value {
+						EvalResult::Literal(s) => s,
+						EvalResult::Empty => return Ok(EvalResult::Literal("false".to_string())),
+						_ => {
+							return Err(RuleError {
+								message: "match value must be a literal".to_string(),
+							});
+						}
 					}
 				};
 
-				// If there's an as() clause, could validate against enum type
-				// For now we proceed directly to matching
-
+				// Find matching arm
 				for arm in &match_expr.arms {
-					let matches = arm.patterns.iter().any(|pattern| {
-						match pattern {
-							MatchPattern::Wildcard => true,
-							MatchPattern::Variant(name) => {
-								// Match against the value directly
-								&value_str == name
-							}
-						}
+					let matches = arm.patterns.iter().any(|pattern| match pattern {
+						MatchPattern::Wildcard => true,
+						MatchPattern::Variant(name) => &value_str == name,
 					});
 
 					if matches {

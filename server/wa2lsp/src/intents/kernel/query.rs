@@ -297,7 +297,7 @@ impl QueryEngine {
 		model.has(type_a, sub_type_of, &Value::Entity(type_b))
 	}
 
-	fn check_predicates(
+	pub fn check_predicates(
 		&self,
 		model: &Model,
 		node: EntityId,
@@ -360,18 +360,23 @@ impl QueryEngine {
 				}
 			}
 			current = next;
+			if current.is_empty() {
+				return Ok(false);
+			}
 		}
 
 		if let Some(ref name) = last_step.node_test {
 			let qname = name.to_string();
 			if let Some(resolved) = model.resolve(&qname) {
 				if self.is_type(model, resolved) {
+					// Type filter - check if any current node HAS this type
 					for node in current {
-						if !self.traverse_to_type(model, node, resolved)?.is_empty() {
+						if model.has_type(node, resolved) {
 							return Ok(true);
 						}
 					}
 				} else {
+					// Predicate - check if any current node has a value for this predicate
 					for node in current {
 						if !model.get_all(node, resolved).is_empty() {
 							return Ok(true);
@@ -451,5 +456,49 @@ impl QueryEngine {
 			Literal::Number(n) => n.to_string(),
 			Literal::Bool(b) => b.to_string(),
 		}
+	}
+
+	/// Follow a path and extract literal values (for match expressions)
+	pub fn extract_literals(
+		&self,
+		model: &Model,
+		start: &[EntityId],
+		path: &QueryPath,
+	) -> Result<Vec<String>, RuleError> {
+		let steps = &path.steps;
+
+		let Some((last_step, prefix_steps)) = steps.split_last() else {
+			return Ok(Vec::new());
+		};
+
+		// Follow prefix steps to get intermediate entities
+		let mut current = start.to_vec();
+		for step in prefix_steps {
+			current = self.execute_step(model, &current, step)?;
+			if current.is_empty() {
+				return Ok(Vec::new());
+			}
+		}
+
+		// Extract literals from last step
+		let mut results = Vec::new();
+		if let Some(ref name) = last_step.node_test {
+			let pred_name = name.to_string();
+			if let Some(pred_id) = model.resolve(&pred_name) {
+				if !self.is_type(model, pred_id) {
+					for node in current {
+						for value in model.get_all(node, pred_id) {
+							match value {
+								Value::Literal(s) => results.push(s),
+								Value::Number(n) => results.push(n.to_string()),
+								_ => {}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		Ok(results)
 	}
 }

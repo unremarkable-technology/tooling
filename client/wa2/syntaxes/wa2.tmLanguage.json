@@ -9,10 +9,13 @@
          "include": "#strings"
       },
       {
-         "include": "#operators"
+         "include": "#docAnnotations"
       },
       {
          "include": "#keywords"
+      },
+      {
+         "include": "#controlFlow"
       },
       {
          "include": "#booleans"
@@ -21,13 +24,16 @@
          "include": "#numbers"
       },
       {
+         "include": "#operators"
+      },
+      {
          "include": "#declarations"
       },
       {
          "include": "#qualifiedNames"
       },
       {
-         "include": "#identifiers"
+         "include": "#pathsAndSelectors"
       }
    ],
    "repository": {
@@ -65,59 +71,57 @@
             }
          ]
       },
-      "operators": {
+      "docAnnotations": {
          "patterns": [
             {
-               "name": "keyword.operator.query.wa2",
-               "match": "\\?\\("
-            },
-            {
-               "name": "keyword.operator.emit.wa2",
-               "match": "\\+\\("
-            },
-            {
-               "name": "keyword.operator.foreach.wa2",
-               "match": "\\*\\("
-            },
-            {
-               "name": "keyword.operator.coerce.wa2",
-               "match": "~\\("
-            },
-            {
-               "name": "keyword.operator.arrow.wa2",
-               "match": "=>"
-            },
-            {
-               "name": "keyword.operator.assign.wa2",
-               "match": "="
-            },
-            {
-               "name": "punctuation.separator.colon.wa2",
-               "match": ":"
-            },
-            {
-               "name": "punctuation.separator.slash.wa2",
-               "match": "/"
-            },
-            {
-               "name": "punctuation.separator.comma.wa2",
-               "match": ","
-            },
-            {
-               "name": "punctuation.terminator.semicolon.wa2",
-               "match": ";"
+               "name": "meta.annotation.doc.wa2",
+               "begin": "@#doc\\s*\\(",
+               "beginCaptures": {
+                  "0": {
+                     "name": "entity.name.function.annotation.wa2"
+                  }
+               },
+               "end": "\\)",
+               "patterns": [
+                  {
+                     "include": "#comments"
+                  },
+                  {
+                     "include": "#strings"
+                  },
+                  {
+                     "name": "variable.parameter.annotation.wa2",
+                     "match": "\\b(tldr|why)\\b(?=\\s*=)"
+                  },
+                  {
+                     "name": "keyword.operator.assignment.wa2",
+                     "match": "="
+                  },
+                  {
+                     "name": "punctuation.separator.comma.wa2",
+                     "match": ","
+                  }
+               ]
             }
          ]
       },
       "keywords": {
          "patterns": [
             {
-               "name": "keyword.control.wa2",
-               "match": "\\b(namespace|struct|enum|type|predicate|rule|policy|instance|governance|let|must|should|setting|in)\\b"
+               "name": "keyword.declaration.wa2",
+               "match": "\\b(namespace|struct|enum|type|predicate|rule|policy|instance|governance)\\b"
             },
             {
-               "name": "keyword.other.modifier.wa2",
-               "match": "\\b(strict|lazy)\\b"
+               "name": "keyword.other.wa2",
+               "match": "\\b(let|must|should|setting)\\b"
+            }
+         ]
+      },
+      "controlFlow": {
+         "patterns": [
+            {
+               "name": "keyword.control.wa2",
+               "match": "\\b(for|in|if|else|return)\\b"
             }
          ]
       },
@@ -137,6 +141,46 @@
             }
          ]
       },
+      "operators": {
+         "patterns": [
+            {
+               "name": "support.function.builtin.wa2",
+               "match": "\\b(query|add)\\b(?=\\s*\\()"
+            },
+            {
+               "name": "keyword.operator.arrow.wa2",
+               "match": "=>"
+            },
+            {
+               "name": "keyword.operator.logical.wa2",
+               "match": "\\b(in)\\b(?=\\s*\\()"
+            },
+            {
+               "name": "keyword.operator.assignment.wa2",
+               "match": "="
+            },
+            {
+               "name": "punctuation.separator.colon.wa2",
+               "match": ":"
+            },
+            {
+               "name": "punctuation.separator.slash.wa2",
+               "match": "/"
+            },
+            {
+               "name": "punctuation.separator.comma.wa2",
+               "match": ","
+            },
+            {
+               "name": "punctuation.terminator.wa2",
+               "match": ";"
+            },
+            {
+               "name": "punctuation.section.brackets.wa2",
+               "match": "[\\[\\]\\(\\)\\{\\}]"
+            }
+         ]
+      },
       "declarations": {
          "patterns": [
             {
@@ -144,7 +188,7 @@
                "match": "\\b(namespace)\\s+([A-Za-z_][A-Za-z0-9_]*)",
                "captures": {
                   "1": {
-                     "name": "keyword.control.wa2"
+                     "name": "keyword.declaration.wa2"
                   },
                   "2": {
                      "name": "entity.name.namespace.wa2"
@@ -153,13 +197,49 @@
             },
             {
                "name": "meta.declaration.type.wa2",
-               "match": "\\b(struct|enum|type|predicate|rule|policy|governance)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+               "match": "\\b(struct|enum|type|predicate)\\s+([A-Za-z_][A-Za-z0-9_]*)",
                "captures": {
                   "1": {
-                     "name": "keyword.control.wa2"
+                     "name": "keyword.declaration.wa2"
                   },
                   "2": {
                      "name": "entity.name.type.wa2"
+                  }
+               }
+            },
+            {
+               "name": "meta.declaration.rule.wa2",
+               "match": "\\b(rule)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+               "captures": {
+                  "1": {
+                     "name": "keyword.declaration.wa2"
+                  },
+                  "2": {
+                     "name": "entity.name.function.wa2"
+                  }
+               }
+            },
+            {
+               "name": "meta.declaration.policy.wa2",
+               "match": "\\b(policy)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+               "captures": {
+                  "1": {
+                     "name": "keyword.declaration.wa2"
+                  },
+                  "2": {
+                     "name": "entity.name.type.policy.wa2"
+                  }
+               }
+            },
+            {
+               "name": "meta.declaration.governance.wa2",
+               "match": "\\b(governance)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+               "captures": {
+                  "1": {
+                     "name": "keyword.declaration.wa2"
+                  },
+                  "2": {
+                     "name": "entity.name.type.governance.wa2"
                   }
                }
             },
@@ -168,7 +248,7 @@
                "match": "\\b(instance)\\s+([^\\s]+)\\s*:\\s*([^\\s]+)",
                "captures": {
                   "1": {
-                     "name": "keyword.control.wa2"
+                     "name": "keyword.declaration.wa2"
                   },
                   "2": {
                      "name": "entity.name.variable.wa2"
@@ -185,18 +265,22 @@
             {
                "name": "variable.other.qualified.wa2",
                "match": "\\b[A-Za-z_][A-Za-z0-9_]*:[A-Za-z_][A-Za-z0-9_]*\\b"
-            },
-            {
-               "name": "variable.other.path.wa2",
-               "match": "(?<!:)//[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)?(?:/[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)?)*(?:/\\*)?"
             }
          ]
       },
-      "identifiers": {
+      "pathsAndSelectors": {
          "patterns": [
             {
-               "name": "identifier.wa2",
-               "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+               "name": "meta.path.selector.wa2",
+               "match": "\\b[A-Za-z_][A-Za-z0-9_]*(:[A-Za-z_][A-Za-z0-9_]*)?(?:/[A-Za-z_\\*][A-Za-z0-9_\\*]*(?::[A-Za-z_][A-Za-z0-9_]*)?)*(?:\\[[^\\]]*\\])*\\b"
+            },
+            {
+               "name": "keyword.operator.wildcard.wa2",
+               "match": "\\*"
+            },
+            {
+               "name": "keyword.operator.optional.wa2",
+               "match": "\\?"
             }
          ]
       }

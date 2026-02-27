@@ -13,11 +13,12 @@ use tower_lsp::lsp_types::Diagnostic;
 use url::Url;
 
 use crate::intents::kernel::ast::{Modal, Policy, Rule};
-use crate::intents::model::Model;
+use crate::intents::model::{Model, NAMESPACE_TYPE};
 use crate::intents::vendor::{DocumentFormat, Method, Vendor, get_projector};
 
 use lexer::Wa2Source;
 use lower::Lower;
+use parser::Resolver;
 use rules::RuleEngine;
 
 /// Result of analyzing a document
@@ -51,6 +52,17 @@ impl Default for Kernel {
 	}
 }
 
+/// Create a resolver from a model that checks if a name is a namespace
+fn model_resolver(model: &Model) -> Resolver<'_> {
+	Box::new(move |name: &str| {
+		if let Some(id) = model.resolve(name) {
+			model.has_type(id, NAMESPACE_TYPE)
+		} else {
+			false
+		}
+	})
+}
+
 impl Kernel {
 	pub fn new() -> Self {
 		Kernel::bootstrap()
@@ -64,9 +76,10 @@ impl Kernel {
 		// 1. Bootstrap model with minimal Rust primitives
 		let mut model = Model::bootstrap();
 
-		// 2. Parse bootstrap.wa2
+		// 2. Parse bootstrap.wa2 with model resolver
 		let source = Wa2Source::from_str(&bootstrap_source);
-		let ast = parser::parse(source.lexer())
+		let resolver = model_resolver(&model);
+		let ast = parser::parse_with_resolver(source.lexer(), resolver)
 			.map_err(|e| vec![Kernel::parse_error_to_diagnostic(&e)])
 			.unwrap();
 
@@ -241,7 +254,7 @@ mod tests {
 
 		let template = model.blank();
 		model
-			.apply_to(template, "wa2:type", "cfn:Template")
+			.apply_to(template, "wa2:type", "aws:cfn:Template")
 			.unwrap();
 		model
 			.apply_entity(workload, "core:source", template)
@@ -249,11 +262,13 @@ mod tests {
 
 		let resources = model.blank();
 		model
-			.apply_entity(template, "cfn:resources", resources)
+			.apply_entity(template, "aws:cfn:resources", resources)
 			.unwrap();
 
 		let bucket = model.ensure_raw("MyBucket");
-		model.apply_to(bucket, "wa2:type", "cfn:Resource").unwrap();
+		model
+			.apply_to(bucket, "wa2:type", "aws:cfn:Resource")
+			.unwrap();
 		model
 			.apply_to(bucket, "aws:type", "\"AWS::S3::Bucket\"")
 			.unwrap();
@@ -261,13 +276,9 @@ mod tests {
 			.apply_entity(resources, "wa2:contains", bucket)
 			.unwrap();
 
-		//eprintln!("Before rules:\n{}", model);
-
 		// 3. Run rules
 		let mut engine = RuleEngine::new();
 		engine.run(&mut model, &rules).expect("run rules");
-
-		//eprintln!("After rules:\n{}", model);
 
 		// 4. Verify core:Store was created
 		let store_type = model
@@ -304,7 +315,7 @@ mod tests {
 
 		let template = model.blank();
 		model
-			.apply_to(template, "wa2:type", "cfn:Template")
+			.apply_to(template, "wa2:type", "aws:cfn:Template")
 			.unwrap();
 		model
 			.apply_entity(workload, "core:source", template)
@@ -312,13 +323,13 @@ mod tests {
 
 		let resources = model.blank();
 		model
-			.apply_entity(template, "cfn:resources", resources)
+			.apply_entity(template, "aws:cfn:resources", resources)
 			.unwrap();
 
 		// SourceBucket with replication configuration
 		let source_bucket = model.ensure_raw("SourceBucket");
 		model
-			.apply_to(source_bucket, "wa2:type", "cfn:Resource")
+			.apply_to(source_bucket, "wa2:type", "aws:cfn:Resource")
 			.unwrap();
 		model
 			.apply_to(source_bucket, "aws:type", "\"AWS::S3::Bucket\"")
@@ -344,7 +355,9 @@ mod tests {
 
 		// ReplicationConfiguration.Role (via GetAtt, but we just need it to exist)
 		let role_ref = model.blank();
-		model.apply_to(role_ref, "wa2:type", "cfn:GetAtt").unwrap();
+		model
+			.apply_to(role_ref, "wa2:type", "aws:cfn:GetAtt")
+			.unwrap();
 		model
 			.apply_entity(replication, "aws:Role", role_ref)
 			.unwrap();
@@ -366,8 +379,6 @@ mod tests {
 		// Run derive_stores first to create core:Store
 		let mut engine = RuleEngine::new();
 		engine.run(&mut model, &rules).expect("run rules");
-
-		//eprintln!("After rules:\n{}", model);
 
 		// Verify core:Store was created for SourceBucket
 		let store_type = model
@@ -399,7 +410,7 @@ mod tests {
 			"Found {} Evidence nodes attached to Store",
 			evidence_nodes.len()
 		);
-      eprintln!("\nModel:\n===\n{}", &model);
+		eprintln!("\nModel:\n===\n{}", &model);
 		eprintln!("Evidence:\n===\n{:?}", evidence_nodes);
 		assert_eq!(evidence_nodes.len(), 1, "Should have one Evidence node");
 
@@ -416,6 +427,5 @@ mod tests {
 			.collect();
 
 		assert_eq!(fact_nodes.len(), 1, "Should have one Resilience fact");
-		//panic!();
 	}
 }
