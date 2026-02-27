@@ -233,7 +233,7 @@ namespace my {
          add(evidence, wa2:contains, fact)
 
          let is_critical = match query(dc_tag/aws:Value) as(my:DataCriticality, strict) {
-            MissionCritical, BusinessCritical, Important => true,
+            MissionCritical, BusinessCritical => true,
             _ => false
          }
 

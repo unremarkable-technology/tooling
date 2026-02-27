@@ -411,7 +411,7 @@ Resources:
 		let cfn_text = std::fs::read_to_string(path).unwrap();
 		let (model, failures) = project_and_analyse(&cfn_text);
 
-		eprintln!("\nModel:\n===\n{}", &model);
+		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
 		eprintln!("Failures:\n===\n{:?}", failures);
 
 		// No tag-related failures (tags present on both buckets)
@@ -429,7 +429,8 @@ Resources:
 		// TODO: Until ~() is implemented, ALL DataCriticality tags create evidence,
 		// so DataBucketLogs (NonCritical) triggers ensure_critical_stores_are_protected.
 		// Once ~() exists, only BusinessCritical/MissionCritical should require resilience.
-		// assert_eq!(failures.len(), 1);
-		// assert!(has_failure_with_area(&model, &failures, "data:isResilient"));
+		assert!(failures.is_empty());
+		assert!(!has_failure_with_area(&model, &failures, "data:isResilient"));
+      panic!();
 	}
 }

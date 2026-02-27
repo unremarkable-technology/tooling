@@ -1,28 +1,109 @@
 # Chapter 1
+Let’s start with the classic “Hello, world” example.
+To do that we need a few things:
+1. WA2 installed - so we can run the example
+2. A stack template, written in CloudFormation YAML to evaluate
+3. Example run
+4. A policy, written in WA2 the _Intent_ language, to say what we want to evaluate for
+5. A rule that generates architectural evidence from our CloudFormation implementation.
 
+by the end of this chapter you will understand
+* WA2 does not check raw properties.
+* It checks architectural facts.
+* Architectural facts can be derived from vendor-specific implementations.
 
+## 1 Installation
+(todo)
 
+## 2 A minimal stack
+This is a very simple AWS stack, it creates a S3 Bucket
+```
+AWSTemplateFormatVersion: "2010-09-09"
 
----- car park
-## Value to you
-Today WA2 supports AWS Cloudformation, but it is designed to be vendor independant:
-* lightning fast template validation (Rust LSP)
-* Education and guidence on adopting best practices
-* Framework with vendor independent architecture best practices
-* Framework language allows you to implement your own rules, policies and governance
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+```
 
-## How it works
-WA2 is an extension for your your editor or IDE (as a LSP).
-It automatically parses and validates Infrastructure-As-Code (IaC),
-currently supporting Cloudformation (JSON and YAML formats).
+## 3 A minimal policy
+Our minimal policy says that every CloudFormation resource must be classified.
+It does not define how classification is implemented — only that it must exist.
+```wa2
+policy require_classification {
+  must classified
+}
 
-## history
-In 2015, AWS publised the Well-Architected Framework...
+rule classified {
+  let resources = query(aws:cfn:Resource)
 
-## Design
-A humble ontological graph for architecture.
-design observation: rules add evidence to the graph,
-which triggers other rules to derive further facts.
-this decouples framework policies from vendor specifics -
-the framework can require data protection for critical stores
-without understanding tagging, CFN, AWS Services, or S3 replication.
+  for r in resources {
+    must query(r/data:Criticality) {
+      subject: r,
+      message: "Resource must be classified"
+    }
+  }
+}
+```
+
+## 4 Run WA2
+```
+$ wa --stack stack.yaml --intent myintent.wa2
+
+Stack stack.yaml: parsed and validated successfully.
+Intent myintent.wa2: parsed and validated successfully.
+
+Failed: stack does not satisfy intent.
+
+Causes:
+✖ require_classification.classified
+ - Resource: DataBucket
+ - Message: Add a DataCriticality tag to this resource
+```
+
+WA2 is not checking for a specific tag.
+It is checking whether architectural evidence of classification exists.
+Right now, no such evidence has been generated.
+
+The policy requires a fact. We have not yet told WA2 how that fact is produced.
+
+## 5 Generating evidence
+Now we tell WA2 how classification is expressed in our CloudFormation implementation.
+In this example, we express classification using a _DataCriticality_ tag:
+
+```
+rule classification_from_tag {
+  let resources = query(aws:cfn:Resource)
+
+  for r in resources {
+    let tag = query(r/aws:Tags/*[aws:Key = "DataCriticality"])
+
+    if tag {
+      add(r, data:Criticality)
+    }
+  }
+}
+```
+
+## 6 Fix the stack
+Update the stack to include the classification tag:
+```
+AWSTemplateFormatVersion: "2010-09-09"
+
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+        - Key: DataCriticality
+          Value: Important
+```
+
+Let’s check the stack again:
+```
+$ wa --stack stack.yaml --intent myintent.wa2
+
+Stack stack.yaml: parsed and validated successfully.
+Intent myintent.wa2: parsed and validated successfully.
+
+Success: stack does satisfy intent.
+```
+
+The policy is satisfied because the required architectural fact now exists.
