@@ -145,8 +145,10 @@ rule express_intent_store_criticality {
 	let scope = query(core:Store)
 
 	for store in scope {
+		let source = query(store/core:source)
+
 		must query(store/core:Evidence/data:Criticality) {
-			subject: store,
+			subject: source,
 			area: data:Criticality,
 			message: "Stores need to have criticality classification"
 		}
@@ -157,8 +159,10 @@ rule ensure_critical_stores_are_protected {
 	let scope = query(core:Store[core:Evidence/data:isCritical])
 
 	for store in scope {
+		let source = query(store/core:source)
+
 		must query(store/core:Evidence/data:isResilient) {
-			subject: store,
+			subject: source,
 			area: data:isResilient,
 			message: "Critical stores need to be protected from loss"
 		}
@@ -194,7 +198,7 @@ namespace my {
 	}
 
 	rule evidence_store_sensitivity_aws_cfn_tagging {
-      let stores = query(core:Store[core:source/aws:cfn:Resource])
+		let stores = query(core:Store[core:source/aws:cfn:Resource])
 
 		for store in stores {
 			let source = query(store/core:source)
@@ -214,35 +218,35 @@ namespace my {
 	}
 
 	rule evidence_store_criticality_aws_cfn_tagging {
-      let stores = query(core:Store[core:source/aws:cfn:Resource])
+		let stores = query(core:Store[core:source/aws:cfn:Resource])
 
-      for store in stores {
-         // find the source of this store
-         let source = query(store/core:source)
-         let dc_tag = query(source/aws:Tags/*[aws:Key = "DataCriticality"])
+		for store in stores {
+			// find the source of this store
+			let source = query(store/core:source)
+			let dc_tag = query(source/aws:Tags/*[aws:Key = "DataCriticality"])
 
-         must query(dc_tag) {
-            subject: source,
-            area: my:DataCriticality,
-            message: "Add a DataCriticality tag to this resource"
-         }
+			must query(dc_tag) {
+				subject: source,
+				area: my:DataCriticality,
+				message: "Add a DataCriticality tag to this resource"
+			}
 
-         let evidence = add(_, wa2:type, core:Evidence)
-         add(store, wa2:contains, evidence)
-         let fact = add(_, wa2:type, data:Criticality)
-         add(evidence, wa2:contains, fact)
+			let evidence = add(_, wa2:type, core:Evidence)
+			add(store, wa2:contains, evidence)
+			let fact = add(_, wa2:type, data:Criticality)
+			add(evidence, wa2:contains, fact)
 
-         let is_critical = match query(dc_tag/aws:Value) as(my:DataCriticality, strict) {
-            MissionCritical, BusinessCritical => true,
-            _ => false
-         }
+			let is_critical = match query(dc_tag/aws:Value) as(my:DataCriticality, strict) {
+				MissionCritical, BusinessCritical => true,
+				_ => false
+			}
 
-         if is_critical {
-            let crit_fact = add(_, wa2:type, data:isCritical)
-            add(evidence, wa2:contains, crit_fact)
-         }
-      }
-   }
+			if is_critical {
+				let crit_fact = add(_, wa2:type, data:isCritical)
+				add(evidence, wa2:contains, crit_fact)
+			}
+		}
+	}
 
 	rule evidence_store_resilience_aws_cfn_s3 {
 		let replicated_stores = query(aws:cfn:Resource[aws:type = "AWS::S3::Bucket"][

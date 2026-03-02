@@ -369,16 +369,22 @@ impl QueryEngine {
 			let qname = name.to_string();
 			if let Some(resolved) = model.resolve(&qname) {
 				if self.is_type(model, resolved) {
-					// Type filter - check if any current node HAS this type
-					for node in current {
-						if model.has_type(node, resolved) {
+					// Type - check if any current node HAS this type
+					for node in &current {
+						if model.has_type(*node, resolved) {
+							return Ok(true);
+						}
+					}
+					// OR traverse to find related entities of this type
+					for node in &current {
+						if !self.traverse_to_type(model, *node, resolved)?.is_empty() {
 							return Ok(true);
 						}
 					}
 				} else {
 					// Predicate - check if any current node has a value for this predicate
-					for node in current {
-						if !model.get_all(node, resolved).is_empty() {
+					for node in &current {
+						if !model.get_all(*node, resolved).is_empty() {
 							return Ok(true);
 						}
 					}

@@ -169,9 +169,22 @@ impl CoreEngine {
 			.into_iter()
 			.filter_map(|failure| {
 				// Get range from subject if available, else from failure entity
+            // or from its source
 				let range = failure
 					.subject
 					.and_then(|s| result.model.get_range(s))
+					.or_else(|| {
+						// Subject has no range - follow core:source to get underlying resource's range
+						failure.subject.and_then(|s| {
+							let core_source = result.model.resolve("core:source")?;
+							result
+								.model
+								.get_all(s, core_source)
+								.first()
+								.and_then(|v| v.as_entity())
+								.and_then(|e| result.model.get_range(e))
+						})
+					})
 					.or_else(|| result.model.get_range(failure.entity))?;
 
 				// Map severity

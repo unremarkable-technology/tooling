@@ -385,8 +385,8 @@ Resources:
 		let cfn_text = std::fs::read_to_string(path).unwrap();
 		let (model, failures) = project_and_analyse(&cfn_text);
 
-		//eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
-		//eprintln!("Failures:\n===\n{:?}", failures);
+		eprintln!("\nModel:\n===\n{}", print_model_as_tree(&model));
+		eprintln!("Failures:\n===\n{:?}", failures);
 
 		// Tags present, no tag failures
 		assert!(!has_failure_with_area(
@@ -400,8 +400,9 @@ Resources:
 			"my:DataCriticality"
 		));
 
-		// But might have criticality evidence failures (needs resilience)
-		// This depends on whether we derive data:Criticality from tags yet
+      // but critical data not protected
+		assert!(has_failure_with_area(&model, &failures, "data:isResilient"));
+		assert!(!failures.is_empty());
 	}
 
 	#[test]
@@ -426,11 +427,8 @@ Resources:
 			"my:DataCriticality"
 		));
 
-		// TODO: Until ~() is implemented, ALL DataCriticality tags create evidence,
-		// so DataBucketLogs (NonCritical) triggers ensure_critical_stores_are_protected.
-		// Once ~() exists, only BusinessCritical/MissionCritical should require resilience.
-		assert!(failures.is_empty());
+		// we should no longer have any errors
 		assert!(!has_failure_with_area(&model, &failures, "data:isResilient"));
-      panic!();
+		assert!(failures.is_empty());
 	}
 }

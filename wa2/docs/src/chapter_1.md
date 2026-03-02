@@ -16,7 +16,7 @@ by the end of this chapter you will understand
 (todo)
 
 ## 2 A minimal stack
-This is a very simple AWS stack, it creates a S3 Bucket
+This is a very simple AWS stack. It creates an S3 bucket.
 ```
 AWSTemplateFormatVersion: "2010-09-09"
 
@@ -64,10 +64,10 @@ WA2 is not checking for a specific tag.
 It is checking whether architectural evidence of classification exists.
 Right now, no such evidence has been generated.
 
-The policy requires a fact. We have not yet told WA2 how that fact is produced.
+The policy requires a fact. We have not yet told WA2 how that fact is produced. The policy fails — correctly.
 
 ## 5 Generating evidence
-Now we tell WA2 how classification is expressed in our CloudFormation implementation.
+Now we define how classification is expressed in our CloudFormation implementation.
 In this example, we express classification using a _DataCriticality_ tag:
 
 ```
@@ -92,8 +92,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 Resources:
   DataBucket:
     Type: AWS::S3::Bucket
-        - Key: DataCriticality
-          Value: Important
+    Tags:
+      - Key: DataCriticality
+        Value: Important
 ```
 
 Let’s check the stack again:

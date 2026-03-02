@@ -439,11 +439,15 @@ async fn analyser_loop(
 				Ok(_template) => {
 					// Fast path succeeded with no diagnostics
 					// Run slow path (WA2 guidance)
+               client.log_message(MessageType::INFO, format!("starting slow analysis: {}", uri)).await;
+
 					let wa2_diagnostics = {
 						let mut engine_guard = engine.lock().unwrap();
 						engine_guard.analyse_document_slow(&uri)
 					};
 
+               client.log_message(MessageType::INFO, format!("finished slow analysis: {} ({} diagnostics)", uri, wa2_diagnostics.len())).await;
+               
 					// Publish WA2 guidance diagnostics
 					if !wa2_diagnostics.is_empty() {
 						let message = format!("doc_analyse_slow: {} (WA2 guidance)", uri);
