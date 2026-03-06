@@ -3,7 +3,7 @@
    "displayName": "WA2 - AWS Well-Architected",
    "description": "CloudFormation validation + Well-Architected best practices. Real-time architectural guidance as you build.",
    "icon": "images/logo.png",
-   "version": "0.1.6",
+   "version": "0.1.7",
    "engines": {
       "vscode": "^1.95.0"
    },
