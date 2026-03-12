@@ -72,7 +72,7 @@ pub struct Kernel {
 
 impl Default for Kernel {
 	fn default() -> Self {
-      let skip_quickstart = false;
+		let skip_quickstart = false;
 		Self::new(skip_quickstart)
 	}
 }
@@ -444,16 +444,16 @@ impl Kernel {
 				// No profile selected - no policies active
 				HashSet::new()
 			};
-      eprintln!("active_policy_names: {active_policy_names:?}");
+		// TODO: make into logging
+		//eprintln!("active_policy_names: {active_policy_names:?}");
 
 		for policy in &self.policies {
 			// Skip policies not in the selected profile
 			if !active_policy_names.contains(&policy.name) {
 				continue;
 			}
-         // TODO: make into logging
-         //eprintln!("\trunning policy {}", policy.name);
-
+			// TODO: make into logging
+			//eprintln!("\trunning policy {}", policy.name);
 
 			for binding in &policy.bindings {
 				let rule_name = binding.rule_name.to_string();
@@ -507,7 +507,7 @@ impl Kernel {
 			.run_with_modals(&mut model, &derives, &active_rules, &rule_modals)
 			.map_err(|e| vec![Kernel::rule_error_to_diagnostic(&e)])?;
 
-      //eprintln!("model: {}", print_model_as_tree(&model));
+		//eprintln!("model: {}", print_model_as_tree(&model));
 		let failures = self.collect_failures(&model);
 
 		Ok(AnalysisResult { model, failures })

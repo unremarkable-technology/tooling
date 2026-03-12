@@ -8,39 +8,39 @@ use wa2lsp::iaac::cloudformation::spec_cache::load_default_spec_store;
 use wa2lsp::intents::kernel::Kernel;
 use wa2lsp::intents::vendor::{DocumentFormat, Method, Vendor};
 
-pub async fn run(profile: &str, stack: &Path, intent: Option<&Path>) {
-	// Validate stack exists
-	if !stack.exists() {
-		eprintln!("Error: Stack file not found: {}", stack.display());
+pub async fn run(profile: &str, target: &Path, entry: Option<&Path>) {
+	// Validate target exists
+	if !target.exists() {
+		eprintln!("Error: target file not found: {}", target.display());
 		process::exit(1);
 	}
 
-	// Load stack text
-	let stack_text = match fs::read_to_string(stack) {
+	// Load target text
+	let target_text = match fs::read_to_string(target) {
 		Ok(t) => t,
 		Err(e) => {
-			eprintln!("Error: Could not read stack file: {}", e);
+			eprintln!("Error: Could not read target file: {}", e);
 			process::exit(1);
 		}
 	};
 
-	let stack_uri =
-		Url::from_file_path(stack.canonicalize().unwrap_or_else(|_| stack.to_path_buf()))
+	let target_uri =
+		Url::from_file_path(target.canonicalize().unwrap_or_else(|_| target.to_path_buf()))
 			.unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
 
 	// Determine format from path
-	let format = DocumentFormat::from_language_id_or_path(None, &stack_uri);
+	let format = DocumentFormat::from_language_id_or_path(None, &target_uri);
 
-	// Fast path: parse stack
+	// Fast path: parse target
 	let template = match format {
-		DocumentFormat::Json => CfnTemplate::from_json(&stack_text, &stack_uri),
-		DocumentFormat::Yaml => CfnTemplate::from_yaml(&stack_text, &stack_uri),
+		DocumentFormat::Json => CfnTemplate::from_json(&target_text, &target_uri),
+		DocumentFormat::Yaml => CfnTemplate::from_yaml(&target_text, &target_uri),
 	};
 
 	let template = match template {
 		Ok(t) => t,
 		Err(diags) => {
-			eprintln!("Stack {}: syntax errors", stack.display());
+			eprintln!("target file {}: syntax errors", target.display());
 			for d in diags {
 				eprintln!("  - {}", d.message);
 			}
@@ -53,7 +53,7 @@ pub async fn run(profile: &str, stack: &Path, intent: Option<&Path>) {
 		Ok(spec_store) => {
 			let spec_diags = template.validate_against_spec(&spec_store);
 			if !spec_diags.is_empty() {
-				eprintln!("Stack {}: specification errors", stack.display());
+				eprintln!("target {}: CloudFormation specification errors", target.display());
 				for d in spec_diags {
 					eprintln!("  - {}", d.message);
 				}
@@ -67,43 +67,43 @@ pub async fn run(profile: &str, stack: &Path, intent: Option<&Path>) {
 	}
 
 	println!(
-		"Stack {}: parsed and validated successfully.",
-		stack.display()
+		"Target file {}: parsed and validated successfully.",
+		target.display()
 	);
 
 	// Load kernel (uses wa2.toml if present, else embedded)
-   let skip_quickstart = intent.is_some();
+   let skip_quickstart = entry.is_some();
    let mut kernel = Kernel::new(skip_quickstart);
 
 	// Layer intent file if provided
-	if let Some(intent_path) = intent {
-		if !intent_path.exists() {
-			eprintln!("Error: Intent file not found: {}", intent_path.display());
+	if let Some(entry_path) = entry {
+		if !entry_path.exists() {
+			eprintln!("Entry file {}: not found", entry_path.display());
 			process::exit(1);
 		}
 
-		if let Err(e) = kernel.load_intent(intent_path) {
-			eprintln!("Intent {}: error", intent_path.display());
+		if let Err(e) = kernel.load_intent(entry_path) {
+			eprintln!("Entry file {}: intent error", entry_path.display());
 			eprintln!("  {}", e);
 			process::exit(1);
 		}
 
 		println!(
-			"Intent {}: parsed and validated successfully.",
-			intent_path.display()
+			"Entry file {}: intent parsed and validated successfully.",
+			entry_path.display()
 		);
 	}
 
 	// Override profile selection
 	if let Err(e) = kernel.set_profile(profile.to_string()) {
-		eprintln!("Error: {}", e);
+		eprintln!("Profile error: {}", e);
 		process::exit(1);
 	}
 
 	// Run analysis
 	let result = kernel.analyse(
-		&stack_text,
-		&stack_uri,
+		&target_text,
+		&target_uri,
 		format,
 		Vendor::Aws,
 		Method::CloudFormation,
@@ -112,10 +112,10 @@ pub async fn run(profile: &str, stack: &Path, intent: Option<&Path>) {
 	match result {
 		Ok(analysis) => {
 			if analysis.failures.is_empty() {
-				println!("\nSuccess: stack does satisfy intent of profile {}.", profile);
+				println!("\nSuccess: target satisfies intent of profile {}.", profile);
 			} else {
 				println!(
-					"\nFailed: stack does not satisfy intent of profile {}",
+					"\nFailed: target does not satisfy intent of profile {}",
 					profile
 				);
 				println!("\nCauses:");
@@ -133,7 +133,7 @@ pub async fn run(profile: &str, stack: &Path, intent: Option<&Path>) {
 			}
 		}
 		Err(diags) => {
-			eprintln!("Stack {}: analysis errors", stack.display());
+			eprintln!("target {}: analysis errors", target.display());
 			for d in diags {
 				eprintln!("  - {}", d.message);
 			}

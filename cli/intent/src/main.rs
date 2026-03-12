@@ -17,9 +17,9 @@ enum Commands {
         #[arg(long)]
         profile: String,
         #[arg(long)]
-        stack: PathBuf,
+        target: PathBuf,
         #[arg(long)]
-        intent: Option<PathBuf>,
+        entry: Option<PathBuf>,
     },
 }
 
@@ -28,8 +28,8 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Check { profile, stack, intent } => {
-            check::run(&profile, &stack, intent.as_deref()).await;
+        Commands::Check { profile, target, entry } => {
+            check::run(&profile, &target, entry.as_deref()).await;
         }
     }
 }
