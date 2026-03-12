@@ -3,138 +3,277 @@ name: Build Multi-Platform
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 permissions:
-  contents: write # reuired for creating a release
-  
+  contents: write
+
+env:
+  EXTENSION_DIR: client/wa2
+
 jobs:
-  build:
-    name: Build ${{ matrix.platform }}
+  validate:
+    name: Validate versions
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Read versions
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+
+          if [[ "$TAG" == "$VERSION" ]]; then
+            echo "Tag must start with v, got: $TAG"
+            exit 1
+          fi
+
+          WORKSPACE_VERSION="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          PACKAGE_VERSION="$(node -p "require('./${{ env.EXTENSION_DIR }}/package.json').version")"
+
+          echo "Tag version:       $VERSION"
+          echo "Workspace version: $WORKSPACE_VERSION"
+          echo "Extension version: $PACKAGE_VERSION"
+
+          [[ -n "$WORKSPACE_VERSION" ]] || { echo "Workspace version not found"; exit 1; }
+          [[ -n "$PACKAGE_VERSION" ]] || { echo "package.json version not found"; exit 1; }
+
+          [[ "$WORKSPACE_VERSION" == "$VERSION" ]] || { echo "Workspace version mismatch"; exit 1; }
+          [[ "$PACKAGE_VERSION" == "$VERSION" ]] || { echo "Extension version mismatch"; exit 1; }
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  extension:
+    name: Build thin VSIX
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install npm dependencies
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm ci
+
+      - name: Compile TypeScript
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm run compile
+
+      - name: Package thin extension
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: |
+          npx @vscode/vsce package --out "../../wa2-${{ needs.validate.outputs.version }}.vsix"
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wa2-vsix
+          path: wa2-${{ needs.validate.outputs.version }}.vsix
+          retention-days: 30
+
+  wa2lsp:
+    name: Build wa2lsp ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
+    needs: validate
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             platform: linux-x64
             target: x86_64-unknown-linux-gnu
+            archive: wa2lsp-linux-x64.tar.gz
+            bin_name: wa2lsp
           - os: macos-latest
             platform: darwin-x64
             target: x86_64-apple-darwin
+            archive: wa2lsp-darwin-x64.tar.gz
+            bin_name: wa2lsp
           - os: macos-latest
             platform: darwin-arm64
             target: aarch64-apple-darwin
+            archive: wa2lsp-darwin-arm64.tar.gz
+            bin_name: wa2lsp
           - os: windows-latest
             platform: win32-x64
             target: x86_64-pc-windows-msvc
-    
+            archive: wa2lsp-win32-x64.zip
+            bin_name: wa2lsp.exe
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Checkout wa2 framework
         run: git clone https://github.com/unremarkable-technology/wa2.git ../wa2
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      
-      - name: Install dependencies (Linux)
-        if: matrix.os == 'ubuntu-latest'
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
 
-      - name: Set Cargo target dir (CI) - Unix
-        if: matrix.os != 'windows-latest'
-        run: echo "CARGO_TARGET_DIR=${{ github.workspace }}/target" >> $GITHUB_ENV
+      - name: Set Cargo target dir
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${{ github.workspace }}/target" >> "$GITHUB_ENV"
 
-      - name: Set Cargo target dir (CI) - Windows
-        if: matrix.os == 'windows-latest'
+      - name: Build wa2lsp
+        run: cargo build --release --target ${{ matrix.target }} -p wa2lsp
+
+      - name: Package wa2lsp (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "dist/${{ matrix.bin_name }}"
+          [ -f README.md ] && cp README.md dist/ || true
+          [ -f LICENSE ] && cp LICENSE dist/ || true
+          tar -czf "${{ matrix.archive }}" -C dist .
+
+      - name: Package wa2lsp (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          "CARGO_TARGET_DIR=${{ github.workspace }}\target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\${{ matrix.bin_name }}" "dist\${{ matrix.bin_name }}"
+          if (Test-Path README.md) { Copy-Item README.md dist\ }
+          if (Test-Path LICENSE) { Copy-Item LICENSE dist\ }
+          Compress-Archive -Path dist\* -DestinationPath "${{ matrix.archive }}"
 
-      - name: Debug CARGO_TARGET_DIR (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          Write-Host "CARGO_TARGET_DIR=$env:CARGO_TARGET_DIR"
-
-      - name: Build LSP server
-        working-directory: server/wa2lsp
-        run: cargo build --release --target ${{ matrix.target }}
-      
-      - name: Debug - Find the binary (Unix)
-        if: matrix.os != 'windows-latest'
-        run: |
-          echo "=== Searching for wa2lsp binary ==="
-          find . -name "wa2lsp" 2>/dev/null || echo "Binary not found"
-          echo "=== Target directory contents ==="
-          ls -la target/${{ matrix.target }}/release/ || echo "Release directory not found"
-      
-      - name: Debug - Find the binary (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $targetDir = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory
-          Write-Host "target_directory = $targetDir"
-          Get-ChildItem -Path $targetDir -Recurse -Filter "wa2lsp.exe" -ErrorAction SilentlyContinue | Select-Object FullName
-
-      - name: Copy binary (Unix)
-        if: matrix.os != 'windows-latest'
-        run: |
-          mkdir -p client/wa2/bin
-          cp target/${{ matrix.target }}/release/wa2lsp client/wa2/bin/
-      
-      - name: Copy binary (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path client/wa2/bin | Out-Null
-          Copy-Item "target\${{ matrix.target }}\release\wa2lsp.exe" "client\wa2\bin\"
-
-      - name: Install npm dependencies
-        working-directory: client/wa2
-        run: npm ci
-      
-      - name: Compile TypeScript
-        working-directory: client/wa2
-        run: npm run compile
-      
-      - name: Package extension
-        working-directory: client/wa2
-        run: npx @vscode/vsce package --target ${{ matrix.platform }}
-      
-      - name: Upload artifact
+      - name: Upload wa2lsp artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wa2-${{ matrix.platform }}
-          path: client/wa2/*.vsix
+          name: wa2lsp-${{ matrix.platform }}
+          path: ${{ matrix.archive }}
+          retention-days: 30
+
+  intent:
+    name: Build intent ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            target: x86_64-unknown-linux-gnu
+            archive: intent-linux-x64.tar.gz
+            bin_name: intent
+          - os: macos-latest
+            platform: darwin-x64
+            target: x86_64-apple-darwin
+            archive: intent-darwin-x64.tar.gz
+            bin_name: intent
+          - os: macos-latest
+            platform: darwin-arm64
+            target: aarch64-apple-darwin
+            archive: intent-darwin-arm64.tar.gz
+            bin_name: intent
+          - os: windows-latest
+            platform: win32-x64
+            target: x86_64-pc-windows-msvc
+            archive: intent-win32-x64.zip
+            bin_name: intent.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout wa2 framework
+        run: git clone https://github.com/unremarkable-technology/wa2.git ../wa2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Set Cargo target dir
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${{ github.workspace }}/target" >> "$GITHUB_ENV"
+
+      - name: Build intent
+        run: cargo build --release --target ${{ matrix.target }} -p intent
+
+      - name: Package intent (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "dist/${{ matrix.bin_name }}"
+          [ -f README.md ] && cp README.md dist/ || true
+          [ -f LICENSE ] && cp LICENSE dist/ || true
+          tar -czf "${{ matrix.archive }}" -C dist .
+
+      - name: Package intent (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\${{ matrix.bin_name }}" "dist\${{ matrix.bin_name }}"
+          if (Test-Path README.md) { Copy-Item README.md dist\ }
+          if (Test-Path LICENSE) { Copy-Item LICENSE dist\ }
+          Compress-Archive -Path dist\* -DestinationPath "${{ matrix.archive }}"
+
+      - name: Upload intent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: intent-${{ matrix.platform }}
+          path: ${{ matrix.archive }}
           retention-days: 30
 
   release:
     name: Create Release
-    needs: build
     runs-on: ubuntu-latest
+    needs:
+      - validate
+      - extension
+      - wa2lsp
+      - intent
     if: startsWith(github.ref, 'refs/tags/')
-    
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      
+
+      - name: Show release files
+        run: find artifacts -type f | sort
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: artifacts/**/*.vsix
+          files: artifacts/**/*
           draft: true
           generate_release_notes: true
