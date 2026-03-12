@@ -11,6 +11,7 @@ permissions:
 
 env:
   EXTENSION_DIR: client/wa2
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   validate:
@@ -20,7 +21,7 @@ jobs:
       version: ${{ steps.versions.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Read versions
         id: versions
@@ -57,7 +58,7 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -78,7 +79,7 @@ jobs:
           npx @vscode/vsce package --out "../../wa2-${{ needs.validate.outputs.version }}.vsix"
 
       - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: wa2-vsix
           path: wa2-${{ needs.validate.outputs.version }}.vsix
@@ -115,7 +116,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout wa2 framework
         run: git clone https://github.com/unremarkable-technology/wa2.git ../wa2
@@ -162,7 +163,7 @@ jobs:
           Compress-Archive -Path dist\* -DestinationPath "${{ matrix.archive }}"
 
       - name: Upload wa2lsp artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: wa2lsp-${{ matrix.platform }}
           path: ${{ matrix.archive }}
@@ -199,7 +200,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout wa2 framework
         run: git clone https://github.com/unremarkable-technology/wa2.git ../wa2
@@ -246,7 +247,7 @@ jobs:
           Compress-Archive -Path dist\* -DestinationPath "${{ matrix.archive }}"
 
       - name: Upload intent artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: intent-${{ matrix.platform }}
           path: ${{ matrix.archive }}
@@ -264,7 +265,7 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 
