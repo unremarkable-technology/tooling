@@ -40,7 +40,7 @@ The GitHub release must be **published**, not left as a draft.
 
 The extension downloads `wa2lsp` from public GitHub release asset URLs like:
 
-`https://github.com/unremarkable-technology/wa2-vscode-extension/releases/download/vX.Y.Z/wa2lsp-linux-x64.tar.gz`
+`https://github.com/unremarkable-technology/tooling/releases/download/vX.Y.Z/wa2lsp-linux-x64.tar.gz`
 
 If the release is still draft, the extension will get a 404 and fail to install the language server.
 

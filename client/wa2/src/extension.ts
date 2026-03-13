@@ -164,19 +164,48 @@ async function resolveServerCommand(
       return binaryPath;
    }
 
+   const releaseUrl = constructLspDownloadUrl(context, extensionVersion, platformAsset);
+
    outputChannel.appendLine(
-      `WA2: Managed wa2lsp ${extensionVersion} not installed; downloading ${platformAsset.archiveName}`
+      `WA2: Managed wa2lsp ${extensionVersion} not installed; downloading from ${releaseUrl}`
    );
 
    await installServerRelease({
       extensionVersion,
       platformAsset,
+      releaseUrl,
       storageDir,
       metadataPath,
       outputChannel,
    });
 
    return binaryPath;
+}
+
+function constructLspDownloadUrl(context: vscode.ExtensionContext, extensionVersion: string, platformAsset: PlatformAsset): string {
+   const repoField = context.extension.packageJSON.repository;
+
+   let repoUrl: string | undefined;
+
+   if (typeof repoField === 'string') {
+      repoUrl = repoField;
+   } else if (repoField && typeof repoField.url === 'string') {
+      repoUrl = repoField.url;
+   }
+
+   if (!repoUrl) {
+      throw new Error('package.json repository.url is missing or invalid');
+   }
+
+   // tidy any "git+https://" into "https://"
+   repoUrl = repoUrl
+      .replace(/^git\+/, '')
+      .replace(/\.git$/, '');
+
+   // removing optional trailing /
+   const normalizedRepo = repoUrl.endsWith('/') ? repoUrl.slice(0, -1) : repoUrl;
+   const releaseUrl = `${normalizedRepo}/releases/download/v${extensionVersion}/${platformAsset.archiveName}`;
+   return releaseUrl;
 }
 
 function getPlatformAsset(): PlatformAsset {
@@ -224,18 +253,16 @@ function getPlatformAsset(): PlatformAsset {
 async function installServerRelease(args: {
    extensionVersion: string;
    platformAsset: PlatformAsset;
+   releaseUrl: string;
    storageDir: string;
    metadataPath: string;
    outputChannel: vscode.OutputChannel;
 }): Promise<void> {
-   const { extensionVersion, platformAsset, storageDir, metadataPath, outputChannel } = args;
+   const { extensionVersion, platformAsset, releaseUrl, storageDir, metadataPath, outputChannel } = args;
 
    const archivePath = path.join(storageDir, platformAsset.archiveName);
-   const releaseUrl =
-      `https://github.com/unremarkable-technology/wa2-vscode-extension/releases/download/` +
-      `v${extensionVersion}/${platformAsset.archiveName}`;
 
-   outputChannel.appendLine(`WA2: Downloading ${releaseUrl}`);
+   outputChannel.appendLine(`WA2: Downloading LSP to ${archivePath}`);
 
    await downloadFile(releaseUrl, archivePath);
 

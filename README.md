@@ -3,7 +3,7 @@
 Ultra-fast CloudFormation validation powered by Rust. A VS Code extension with 71% test coverage (89% on valid templates) that's **9× faster than AWS Toolkit**.
 
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/FigmentEngineLtd.wa2)](https://marketplace.visualstudio.com/items?itemName=FigmentEngineLtd.wa2)
-[![GitHub Release](https://img.shields.io/github/v/release/unremarkable-technology/wa2-vscode-extension)](https://github.com/unremarkable-technology/wa2-vscode-extension/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/unremarkable-technology/tooling)](https://github.com/unremarkable-technology/tooling/releases)
 
 ---
 
@@ -51,8 +51,8 @@ Install from [VS Code Marketplace](https://marketplace.visualstudio.com/items?it
 ### For Developers
 ```bash
 # Clone repository
-git clone https://github.com/unremarkable-technology/wa2-vscode-extension
-cd wa2-vscode-extension
+git clone https://github.com/unremarkable-technology/tooling
+cd tooling
 
 # Build LSP server
 cd server/wa2lsp
@@ -149,7 +149,7 @@ Apache 2.0 License - See [LICENSE](LICENSE)
 
 ## 🙋 Support
 
-- **Issues**: [GitHub Issues](https://github.com/unremarkable-technology/wa2-vscode-extension/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/unremarkable-technology/wa2-vscode-extension/discussions)
+- **Issues**: [GitHub Issues](https://github.com/unremarkable-technology/tooling/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/unremarkable-technology/tooling/discussions)
 
 ---

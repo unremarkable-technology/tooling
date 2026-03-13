@@ -129,8 +129,8 @@ Designed for consistent sub-second feedback as you build.
 
 ## 🔗 Links
 
-- GitHub: https://github.com/unremarkable-technology/wa2-vscode-extension  
-- Issues: https://github.com/unremarkable-technology/wa2-vscode-extension/issues  
+- GitHub: https://github.com/unremarkable-technology/tooling  
+- Issues: https://github.com/unremarkable-technology/tooling/issues  
 
 ---
 
