@@ -2,6 +2,7 @@
 
 use indexmap::IndexMap;
 use tower_lsp::lsp_types::{Position, Range};
+use url::Url;
 
 use crate::iaac::cloudformation::cfn_ir::types::{
 	CFN_INTRINSICS, CfnOutput, CfnParameter, CfnResource, CfnValue,
@@ -583,6 +584,7 @@ pub fn project_parameters(
 	model: &mut Model,
 	template_entity: EntityId,
 	parameters: &IndexMap<String, CfnParameter>,
+   uri: &Url,
 ) -> Result<(), ModelError> {
 	if parameters.is_empty() {
 		return Ok(());
@@ -602,6 +604,7 @@ pub fn project_parameters(
 		model.apply_entity(params_container, "wa2:contains", param_entity)?;
 
 		model.set_range(param_entity, param.name_range);
+      model.set_uri(param_entity, uri.clone());
 
 		if let Some(ref desc) = param.description {
 			model.apply_to(
@@ -657,6 +660,7 @@ pub fn project_outputs(
 	model: &mut Model,
 	template_entity: EntityId,
 	outputs: &IndexMap<String, CfnOutput>,
+   uri: &Url,
 ) -> Result<(), ModelError> {
 	if outputs.is_empty() {
 		return Ok(());
@@ -674,6 +678,7 @@ pub fn project_outputs(
 		model.apply_to(output_entity, "aws:cfn:name", &output.name)?;
 		model.apply_entity(output_entity, "wa2:type", cfn_output)?;
 		model.set_range(output_entity, output.name_range);
+      model.set_uri(output_entity, uri.clone());
 		model.apply_entity(outputs_container, "wa2:contains", output_entity)?;
 
 		// NOTE: project_value adds "aws:" prefix, so pass "cfn:value" to get "aws:cfn:value"
@@ -693,6 +698,7 @@ pub fn project_resources(
 	model: &mut Model,
 	template_entity: EntityId,
 	resources: &IndexMap<String, CfnResource>,
+   uri: &Url,
 ) -> Result<Vec<EntityId>, ModelError> {
 	if resources.is_empty() {
 		return Ok(vec![]);
@@ -719,6 +725,7 @@ pub fn project_resources(
 
 		model.apply_entity(resources_container, "wa2:contains", entity)?;
 		model.set_range(entity, resource.logical_id_range);
+      model.set_uri(entity, uri.clone());
 
 		for (prop_name, (prop_value, _)) in &resource.properties {
 			project_value(model, entity, prop_name, prop_value)?;

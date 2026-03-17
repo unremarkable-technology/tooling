@@ -20,6 +20,8 @@ enum Status {
 	Pass,
 	Warn,
 	Fail,
+   
+   #[allow(unused)]
 	Blocked,
 }
 
@@ -329,17 +331,39 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>) -> ExitCode
 			detail_parts.push(format!("Subject: {name}"));
 		}
 
+		if let Some(location) = analysis.resolve_failure_location(failure) {
+         // make location url into file path - relative to current directory
+			let display_path = location
+				.uri
+				.to_file_path()
+				.ok()
+				.and_then(|p| {
+					std::env::current_dir()
+						.ok()
+						.and_then(|cwd| p.strip_prefix(&cwd).ok().map(|rel| rel.to_path_buf()))
+						.or(Some(p))
+				})
+				.map(|p| p.display().to_string())
+				.unwrap_or_else(|| location.uri.to_string());
+
+			detail_parts.push(format!(
+				"Location: {}: line {}",
+				display_path,
+				location.range.start.line + 1,
+			));
+		}
+
 		if let Some(msg) = &failure.message {
-			detail_parts.push(msg.clone());
+			detail_parts.push(format!("Message: {msg}"));
 		}
 
 		let detail = if detail_parts.is_empty() {
 			None
 		} else {
-			Some(detail_parts.join("\n\n"))
+			Some(detail_parts.join("\n"))
 		};
 
-      let label = format!("{} ({})", failure.assertion, failure.severity.label());
+		let label = format!("{} ({})", failure.assertion, failure.severity.label());
 		out.tree(
 			&profile_prefix,
 			is_last,

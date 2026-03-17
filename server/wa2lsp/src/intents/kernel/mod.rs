@@ -96,6 +96,47 @@ impl AssertSeverity {
 	}
 }
 
+pub struct FailureLocation {
+	pub uri: Url,
+	pub range: tower_lsp::lsp_types::Range,
+}
+
+impl AnalysisResult {
+	pub fn resolve_failure_location(&self, failure: &AssertFailure) -> Option<FailureLocation> {
+		let range = failure
+			.subject
+			.and_then(|s| self.model.get_range(s))
+			.or_else(|| {
+				failure.subject.and_then(|s| {
+					let core_source = self.model.resolve("core:source")?;
+					self.model
+						.get_all(s, core_source)
+						.first()
+						.and_then(|v| v.as_entity())
+						.and_then(|e| self.model.get_range(e))
+				})
+			})
+			.or_else(|| self.model.get_range(failure.entity))?;
+
+		let uri = failure
+			.subject
+			.and_then(|s| self.model.get_uri(s))
+			.or_else(|| {
+				failure.subject.and_then(|s| {
+					let core_source = self.model.resolve("core:source")?;
+					self.model
+						.get_all(s, core_source)
+						.first()
+						.and_then(|v| v.as_entity())
+						.and_then(|e| self.model.get_uri(e))
+				})
+			})
+			.or_else(|| self.model.get_uri(failure.entity))?;
+
+		Some(FailureLocation { uri: uri.clone(), range })
+	}
+}
+
 /// Kernel - the WA2 analysis engine
 pub struct Kernel {
 	source_path: Option<std::path::PathBuf>,

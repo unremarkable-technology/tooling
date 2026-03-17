@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use tower_lsp::lsp_types::Range;
+use url::Url;
 
 // ─── Identifiers ───
 
@@ -264,6 +265,7 @@ pub struct Model {
 
 	// Source location tracking (sidecar)
 	source_ranges: HashMap<EntityId, Range>,
+	source_uris: HashMap<EntityId, Url>,
 }
 
 impl Model {
@@ -282,6 +284,7 @@ impl Model {
 			by_predicate: HashMap::new(),
 			root: None,
 			source_ranges: HashMap::new(),
+			source_uris: HashMap::new(),
 		}
 	}
 
@@ -930,6 +933,16 @@ impl Model {
 		self.source_ranges.get(&entity).copied()
 	}
 
+	/// Associate a source URI with an entity
+	pub fn set_uri(&mut self, entity: EntityId, uri: Url) {
+		self.source_uris.insert(entity, uri);
+	}
+
+	/// Get the source URI for an entity
+	pub fn get_uri(&self, entity: EntityId) -> Option<&Url> {
+		self.source_uris.get(&entity)
+	}
+   
 	/// Find entity at a given position (for go-to-definition, hover)
 	/// When multiple entities contain the position, returns the one with the smallest range
 	pub fn entity_at_position(&self, position: tower_lsp::lsp_types::Position) -> Option<EntityId> {
@@ -1003,7 +1016,7 @@ impl fmt::Display for Model {
 		writeln!(f, "─────────────────────────────────────")?;
 
 		for stmt in &self.statements {
-         let id = stmt.subject.0;
+			let id = stmt.subject.0;
 			let subj = self.qualified_name(stmt.subject);
 			let pred = self.qualified_name(stmt.predicate);
 			let obj = match &stmt.object {

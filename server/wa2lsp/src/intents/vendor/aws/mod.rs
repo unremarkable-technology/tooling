@@ -37,11 +37,15 @@ impl VendorProjector for AwsCfnProjector {
 			DocumentFormat::Yaml => CfnTemplate::from_yaml(text, uri),
 		}?;
 
-		project_template_into(model, &template).map_err(model_error_to_diags)
+		project_template_into(model, &template, uri).map_err(model_error_to_diags)
 	}
 }
 
-pub fn project_template_into(model: &mut Model, template: &CfnTemplate) -> Result<(), ModelError> {
+pub fn project_template_into(
+	model: &mut Model,
+	template: &CfnTemplate,
+	uri: &Url,
+) -> Result<(), ModelError> {
 	// Ensure types exist (idempotent if already loaded from bootstrap.wa2)
 	cfn_projector::ensure_cfn_types(model)?;
 	cfn_projector::ensure_aws_types(model)?;
@@ -58,11 +62,11 @@ pub fn project_template_into(model: &mut Model, template: &CfnTemplate) -> Resul
 	model.set_root(workload);
 
 	// Project template sections
-	cfn_projector::project_outputs(model, template_entity, &template.outputs)?;
-	cfn_projector::project_parameters(model, template_entity, &template.parameters)?;
+	cfn_projector::project_outputs(model, template_entity, &template.outputs, uri)?;
+	cfn_projector::project_parameters(model, template_entity, &template.parameters, uri)?;
 	cfn_projector::project_pseudo_parameters(model, template_entity)?;
 
-	let entities = cfn_projector::project_resources(model, template_entity, &template.resources)?;
+	let entities = cfn_projector::project_resources(model, template_entity, &template.resources, uri)?;
 
 	Ok(())
 }
