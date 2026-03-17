@@ -1,106 +1,266 @@
+// check.rs
 use std::fs;
 use std::path::Path;
-use std::process;
+use std::process::ExitCode;
 
+use is_terminal::IsTerminal;
+use owo_colors::OwoColorize;
+use terminal_size::{Width, terminal_size};
+use textwrap::{Options, wrap};
+use unicode_width::UnicodeWidthStr;
 use url::Url;
+
 use wa2lsp::iaac::cloudformation::cfn_ir::types::CfnTemplate;
 use wa2lsp::iaac::cloudformation::spec_cache::load_default_spec_store;
 use wa2lsp::intents::kernel::Kernel;
 use wa2lsp::intents::vendor::{DocumentFormat, Method, Vendor};
 
-pub async fn run(profile: &str, target: &Path, entry: Option<&Path>) {
-	// Validate target exists
-	if !target.exists() {
-		eprintln!("Error: target file not found: {}", target.display());
-		process::exit(1);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Status {
+	Pass,
+	Warn,
+	Fail,
+	Blocked,
+}
+
+struct Reporter {
+	interactive: bool,
+	width: usize,
+}
+
+impl Reporter {
+	fn new() -> Self {
+		let interactive = std::io::stdout().is_terminal();
+		let width = terminal_size()
+			.map(|(Width(w), _)| w as usize)
+			.unwrap_or(100);
+
+		Self { interactive, width }
 	}
 
-	// Load target text
+	fn section(&self, title: &str) {
+		println!();
+		println!("{title}");
+		println!("{}", "-".repeat(title.len()));
+	}
+
+	fn setup(&self, status: Status, label: &str, detail: Option<&str>) {
+		self.node("", true, status, label, detail);
+	}
+
+	fn tree(&self, prefix: &str, is_last: bool, status: Status, label: &str, detail: Option<&str>) {
+		self.node(prefix, is_last, status, label, detail);
+	}
+
+	fn node(&self, prefix: &str, is_last: bool, status: Status, label: &str, detail: Option<&str>) {
+		let branch = if prefix.is_empty() {
+			""
+		} else if is_last {
+			"└─ "
+		} else {
+			"├─ "
+		};
+
+		let first_prefix = format!("{prefix}{branch}");
+		let rest_prefix = if prefix.is_empty() {
+			"   ".to_string()
+		} else if is_last {
+			format!("{prefix}   ")
+		} else {
+			format!("{prefix}│  ")
+		};
+
+		let marker = self.marker(status);
+		println!("{first_prefix}{marker} {label}");
+
+		if let Some(detail) = detail {
+			self.write_wrapped_block(&rest_prefix, detail);
+		}
+	}
+
+	fn child_prefix(prefix: &str, is_last: bool) -> String {
+		if prefix.is_empty() {
+			if is_last {
+				"   ".into()
+			} else {
+				"│  ".into()
+			}
+		} else if is_last {
+			format!("{prefix}   ")
+		} else {
+			format!("{prefix}│  ")
+		}
+	}
+
+	fn write_wrapped_block(&self, prefix: &str, text: &str) {
+		for para in text.split("\n\n") {
+			let trimmed = para.trim();
+			if trimmed.is_empty() {
+				continue;
+			}
+
+			let available = self.width.saturating_sub(UnicodeWidthStr::width(prefix));
+
+			let options = Options::new(available.max(20));
+			for line in wrap(trimmed, options) {
+				println!("{prefix}{}", line);
+			}
+			println!("{prefix}");
+		}
+	}
+
+	fn marker(&self, status: Status) -> String {
+		let s = match status {
+			Status::Pass => "✓",
+			Status::Warn => "!",
+			Status::Fail => "✗",
+			Status::Blocked => "•",
+		};
+
+		if !self.interactive {
+			return s.to_string();
+		}
+
+		match status {
+			Status::Pass => s.green().to_string(),
+			Status::Warn => s.yellow().to_string(),
+			Status::Fail => s.red().to_string(),
+			Status::Blocked => s.dimmed().to_string(),
+		}
+	}
+}
+
+pub async fn run(profile: &str, target: &Path, entry: Option<&Path>) -> ExitCode {
+	let out = Reporter::new();
+	out.section("SETUP");
+
+	if !target.exists() {
+		out.setup(
+			Status::Fail,
+			&format!("Read target {}", target.display()),
+			Some("Target file not found."),
+		);
+		return ExitCode::FAILURE;
+	}
+
 	let target_text = match fs::read_to_string(target) {
-		Ok(t) => t,
+		Ok(t) => {
+			out.setup(
+				Status::Pass,
+				&format!("Read target {}", target.display()),
+				None,
+			);
+			t
+		}
 		Err(e) => {
-			eprintln!("Error: Could not read target file: {}", e);
-			process::exit(1);
+			out.setup(
+				Status::Fail,
+				&format!("Read target {}", target.display()),
+				Some(&e.to_string()),
+			);
+			return ExitCode::FAILURE;
 		}
 	};
 
-	let target_uri =
-		Url::from_file_path(target.canonicalize().unwrap_or_else(|_| target.to_path_buf()))
-			.unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
+	let target_uri = Url::from_file_path(
+		target
+			.canonicalize()
+			.unwrap_or_else(|_| target.to_path_buf()),
+	)
+	.unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
 
-	// Determine format from path
 	let format = DocumentFormat::from_language_id_or_path(None, &target_uri);
 
-	// Fast path: parse target
 	let template = match format {
 		DocumentFormat::Json => CfnTemplate::from_json(&target_text, &target_uri),
 		DocumentFormat::Yaml => CfnTemplate::from_yaml(&target_text, &target_uri),
 	};
 
 	let template = match template {
-		Ok(t) => t,
+		Ok(t) => {
+			out.setup(Status::Pass, "Parse CloudFormation template", None);
+			t
+		}
 		Err(diags) => {
-			eprintln!("target file {}: syntax errors", target.display());
-			for d in diags {
-				eprintln!("  - {}", d.message);
-			}
-			process::exit(1);
+			let detail = diags
+				.into_iter()
+				.map(|d| d.message)
+				.collect::<Vec<_>>()
+				.join("\n\n");
+			out.setup(Status::Fail, "Parse CloudFormation template", Some(&detail));
+			return ExitCode::FAILURE;
 		}
 	};
 
-	// Validate against CloudFormation spec
 	match load_default_spec_store().await {
 		Ok(spec_store) => {
 			let spec_diags = template.validate_against_spec(&spec_store);
-			if !spec_diags.is_empty() {
-				eprintln!("target {}: CloudFormation specification errors", target.display());
-				for d in spec_diags {
-					eprintln!("  - {}", d.message);
-				}
-				process::exit(1);
+			if spec_diags.is_empty() {
+				out.setup(Status::Pass, "Validate CloudFormation against specification", None);
+			} else {
+				let detail = spec_diags
+					.into_iter()
+					.map(|d| d.message)
+					.collect::<Vec<_>>()
+					.join("\n\n");
+				out.setup(Status::Fail, "Validate CloudFormation against specification", Some(&detail));
+				return ExitCode::FAILURE;
 			}
 		}
 		Err(e) => {
-			eprintln!("Warning: Could not load CloudFormation spec: {}", e);
-			eprintln!("         Skipping spec validation.");
+			out.setup(
+				Status::Warn,
+				"Load CloudFormation spec",
+				Some(&format!(
+					"Could not load CloudFormation specification: {e}\n\nSkipping specification validation."
+				)),
+			);
 		}
 	}
 
-	println!(
-		"Target file {}: parsed and validated successfully.",
-		target.display()
-	);
+	let skip_quickstart = entry.is_some();
+	let mut kernel = Kernel::new(skip_quickstart);
+	out.setup(Status::Pass, "Initialise kernel", None);
 
-	// Load kernel (uses wa2.toml if present, else embedded)
-   let skip_quickstart = entry.is_some();
-   let mut kernel = Kernel::new(skip_quickstart);
-
-	// Layer intent file if provided
 	if let Some(entry_path) = entry {
 		if !entry_path.exists() {
-			eprintln!("Entry file {}: not found", entry_path.display());
-			process::exit(1);
+			out.setup(
+				Status::Fail,
+				&format!("Read intent entry {}", entry_path.display()),
+				Some("Entry file not found."),
+			);
+			return ExitCode::FAILURE;
 		}
 
-		if let Err(e) = kernel.load_intent(entry_path) {
-			eprintln!("Entry file {}: intent error", entry_path.display());
-			eprintln!("  {}", e);
-			process::exit(1);
+		match kernel.load_intent(entry_path) {
+			Ok(_) => {
+				out.setup(
+					Status::Pass,
+					&format!("Parse intent entry {}", entry_path.display()),
+					None,
+				);
+			}
+			Err(e) => {
+				out.setup(
+					Status::Fail,
+					&format!("Parse intent entry {}", entry_path.display()),
+					Some(&e.to_string()),
+				);
+				return ExitCode::FAILURE;
+			}
 		}
-
-		println!(
-			"Entry file {}: intent parsed and validated successfully.",
-			entry_path.display()
-		);
 	}
 
-	// Override profile selection
 	if let Err(e) = kernel.set_profile(profile.to_string()) {
-		eprintln!("Profile error: {}", e);
-		process::exit(1);
+		out.setup(
+			Status::Fail,
+			&format!("Select profile {profile}"),
+			Some(&e.to_string()),
+		);
+		return ExitCode::FAILURE;
 	}
+	out.setup(Status::Pass, &format!("Select profile {profile}"), None);
 
-	// Run analysis
 	let result = kernel.analyse(
 		&target_text,
 		&target_uri,
@@ -109,35 +269,66 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>) {
 		Method::CloudFormation,
 	);
 
-	match result {
+	let analysis = match result {
 		Ok(analysis) => {
-			if analysis.failures.is_empty() {
-				println!("\nSuccess: target satisfies intent of profile {}.", profile);
-			} else {
-				println!(
-					"\nFailed: target does not satisfy intent of profile {}",
-					profile
-				);
-				println!("\nCauses:");
-				for failure in &analysis.failures {
-					println!("✖ {}", failure.assertion);
-					if let Some(subject) = failure.subject {
-						let name = analysis.model.qualified_name(subject);
-						println!("  - Subject: {}", name);
-					}
-					if let Some(ref msg) = failure.message {
-						println!("  - Message: {}", msg);
-					}
-				}
-				process::exit(1);
-			}
+			out.setup(Status::Pass, "Run analysis", None);
+			analysis
 		}
 		Err(diags) => {
-			eprintln!("target {}: analysis errors", target.display());
-			for d in diags {
-				eprintln!("  - {}", d.message);
-			}
-			process::exit(1);
+			let detail = diags
+				.into_iter()
+				.map(|d| d.message)
+				.collect::<Vec<_>>()
+				.join("\n\n");
+			out.setup(Status::Fail, "Run analysis", Some(&detail));
+			return ExitCode::FAILURE;
 		}
+	};
+
+	out.section("RESULTS");
+
+	if analysis.failures.is_empty() {
+		out.tree(
+			"",
+			true,
+			Status::Pass,
+			&format!("Profile: {profile}"),
+			Some("Target satisfies the selected intent profile."),
+		);
+		return ExitCode::SUCCESS;
 	}
+
+	out.tree("", true, Status::Fail, &format!("Profile: {profile}"), None);
+	let profile_prefix = Reporter::child_prefix("", true);
+
+	for (idx, failure) in analysis.failures.iter().enumerate() {
+		let is_last = idx + 1 == analysis.failures.len();
+
+		let mut detail_parts = Vec::new();
+
+		if let Some(subject) = failure.subject {
+			let name = analysis.model.qualified_name(subject);
+			detail_parts.push(format!("Subject: {name}"));
+		}
+
+		if let Some(msg) = &failure.message {
+			detail_parts.push(msg.clone());
+		}
+
+		let detail = if detail_parts.is_empty() {
+			None
+		} else {
+			Some(detail_parts.join("\n\n"))
+		};
+
+		out.tree(
+			&profile_prefix,
+			is_last,
+			Status::Fail,
+			&failure.assertion,
+			detail.as_deref(),
+		);
+	}
+
+	ExitCode::FAILURE
 }

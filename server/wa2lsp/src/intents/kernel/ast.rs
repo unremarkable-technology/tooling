@@ -249,6 +249,8 @@ pub enum Expr {
 	Empty(Box<Expr>, Span),
 	/// Match expression: match v as(T, strict) { ... }
 	Match(Box<MatchExpr>),
+   /// Standalone as validation: query(...) as(Type)
+    As(Box<AsValidation>),
 }
 
 /// Query expression: query(path)
@@ -312,15 +314,16 @@ pub struct MatchExpr {
 #[derive(Debug, Clone)]
 pub struct AsExpr {
 	pub target_type: QualifiedName,
-	pub mode: ConvertMode,
+	pub mode: Modal,
 	pub span: Span,
 }
 
-/// Conversion mode for as()
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ConvertMode {
-	Strict,
-	Lazy,
+/// Standalone as validation: expr as(Type)
+#[derive(Debug, Clone)]
+pub struct AsValidation {
+    pub inner: Expr,
+    pub target_type: QualifiedName,
+    pub span: Span,
 }
 
 /// Match arm: Pattern => result

@@ -1,4 +1,8 @@
+// main.rs
+
 use std::path::PathBuf;
+use std::process::ExitCode;
+
 use clap::{Parser, Subcommand};
 
 mod check;
@@ -24,12 +28,12 @@ enum Commands {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Check { profile, target, entry } => {
-            check::run(&profile, &target, entry.as_deref()).await;
+            check::run(&profile, &target, entry.as_deref()).await
         }
     }
 }

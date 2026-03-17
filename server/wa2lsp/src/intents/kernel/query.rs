@@ -497,7 +497,13 @@ impl QueryEngine {
 							match value {
 								Value::Literal(s) => results.push(s),
 								Value::Number(n) => results.push(n.to_string()),
-								_ => {}
+								Value::Entity(e) => {
+									// Check if entity represents a literal (quoted string)
+									let name = model.qualified_name(e);
+									if name.starts_with('"') && name.ends_with('"') {
+										results.push(name);
+									}
+								}
 							}
 						}
 					}

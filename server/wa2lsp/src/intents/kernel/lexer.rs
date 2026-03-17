@@ -56,10 +56,6 @@ pub enum Token {
 	KwMatch,
 	#[token("as")]
 	KwAs,
-	#[token("strict")]
-	KwStrict,
-	#[token("lazy")]
-	KwLazy,
 	#[token("derive")]
 	KwDerive,
 	#[token("profile")]
@@ -194,7 +190,7 @@ mod tests {
 
 	#[test]
 	fn lex_for_if_match() {
-		let src = r#"for x in items { if cond { match v as(T, strict) { A => true } } }"#;
+		let src = r#"for x in items { if cond { match v as(T, should) { A => true } } }"#;
 		let source = Wa2Source::from_str(src);
 		let tokens: Vec<_> = source.lexer().filter_map(|r| r.ok()).collect();
 
@@ -202,7 +198,7 @@ mod tests {
 		assert!(tokens.contains(&Token::KwIf));
 		assert!(tokens.contains(&Token::KwMatch));
 		assert!(tokens.contains(&Token::KwAs));
-		assert!(tokens.contains(&Token::KwStrict));
+		assert!(tokens.contains(&Token::KwShould));
 		assert!(tokens.contains(&Token::FatArrow));
 	}
 

@@ -60,6 +60,83 @@ impl<'m> Lower<'m> {
 		}
 	}
 
+	/// Qualify type name in AsExpr if unqualified
+	fn qualify_as_expr(&self, as_expr: &mut AsExpr) {
+		if as_expr.target_type.namespace.is_none() {
+			as_expr.target_type.namespace = Some(self.current_namespace());
+		}
+	}
+
+	/// Walk statements and qualify type names in as() expressions
+	fn qualify_statements(&self, stmts: &mut [Statement]) {
+		for stmt in stmts {
+			self.qualify_statement(stmt);
+		}
+	}
+
+	fn qualify_statement(&self, stmt: &mut Statement) {
+		match stmt {
+			Statement::Let(let_stmt) => {
+				self.qualify_expr(&mut let_stmt.value);
+			}
+			Statement::For(for_stmt) => {
+				self.qualify_expr(&mut for_stmt.collection);
+				self.qualify_statements(&mut for_stmt.body);
+			}
+			Statement::If(if_stmt) => {
+				self.qualify_expr(&mut if_stmt.condition);
+				self.qualify_statements(&mut if_stmt.then_body);
+				if let Some(ref mut else_body) = if_stmt.else_body {
+					self.qualify_statements(else_body);
+				}
+			}
+			Statement::Add(add_stmt) => {
+				self.qualify_expr(&mut add_stmt.subject);
+				self.qualify_expr(&mut add_stmt.object);
+			}
+			Statement::Assert(assert_stmt) => {
+				self.qualify_expr(&mut assert_stmt.expr);
+			}
+			Statement::Modal(modal_stmt) => {
+				self.qualify_expr(&mut modal_stmt.expr);
+			}
+		}
+	}
+
+	fn qualify_expr(&self, expr: &mut Expr) {
+		match expr {
+			Expr::Match(match_expr) => {
+				self.qualify_expr(&mut match_expr.value);
+				if let Some(ref mut as_type) = match_expr.as_type {
+					self.qualify_as_expr(as_type);
+				}
+				for arm in &mut match_expr.arms {
+					self.qualify_expr(&mut arm.result);
+				}
+			}
+			Expr::As(as_validation) => {
+				self.qualify_expr(&mut as_validation.inner);
+				if as_validation.target_type.namespace.is_none() {
+					as_validation.target_type.namespace = Some(self.current_namespace());
+				}
+			}
+			Expr::Add(add_expr) => {
+				self.qualify_expr(&mut add_expr.subject);
+				self.qualify_expr(&mut add_expr.object);
+			}
+			Expr::Empty(inner, _) => {
+				self.qualify_expr(inner);
+			}
+			// These don't contain type references that need qualifying
+			Expr::Query(_) => {}
+			Expr::Var(_, _) => {}
+			Expr::Blank(_) => {}
+			Expr::QName(_) => {}
+			Expr::String(_, _) => {}
+			Expr::Bool(_, _) => {}
+		}
+	}
+
 	/// Lower AST to model, returns rules for later execution
 	pub fn lower(&mut self, ast: &Ast) -> Result<LowerResult, LowerError> {
 		let mut rules = Vec::new();
@@ -208,6 +285,7 @@ impl<'m> Lower<'m> {
 				let mut qualified_rule = rule.clone();
 				let qualified_name = self.qualify(&rule.name);
 				qualified_rule.name = qualified_name;
+				self.qualify_statements(&mut qualified_rule.body);
 				rules.push(qualified_rule);
 			}
 
@@ -218,6 +296,7 @@ impl<'m> Lower<'m> {
 				let mut qualified_derive = derive.clone();
 				let qualified_name = self.qualify(&derive.name);
 				qualified_derive.name = qualified_name;
+				self.qualify_statements(&mut qualified_derive.body);
 				derives.push(qualified_derive);
 			}
 

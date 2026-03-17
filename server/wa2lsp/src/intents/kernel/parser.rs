@@ -758,6 +758,27 @@ fn parse_assert_stmt(p: &mut Parser) -> Result<AssertStmt, ParseError> {
 }
 
 fn parse_expr(p: &mut Parser) -> Result<Expr, ParseError> {
+	let expr = parse_primary_expr(p)?;
+
+	// Check for trailing as(Type) - standalone validation
+	if p.at(&Token::KwAs) {
+		let start = p.span.start;
+		p.advance();
+		p.expect(Token::LParen)?;
+		let target_type = parse_qualified_name(p)?;
+		p.expect(Token::RParen)?;
+
+		return Ok(Expr::As(Box::new(AsValidation {
+			inner: expr,
+			target_type,
+			span: start..p.span.end,
+		})));
+	}
+
+	Ok(expr)
+}
+
+fn parse_primary_expr(p: &mut Parser) -> Result<Expr, ParseError> {
 	match &p.current {
 		Some(Token::Underscore) => {
 			let span = p.span.clone();
@@ -841,7 +862,7 @@ fn parse_query_expr_keyword(p: &mut Parser) -> Result<Expr, ParseError> {
 fn parse_match_expr(p: &mut Parser) -> Result<Expr, ParseError> {
 	let start = p.span.start;
 	p.expect(Token::KwMatch)?;
-	let value = parse_expr(p)?;
+	let value = parse_primary_expr(p)?; // Changed from parse_expr
 
 	// Optional as(Type, mode)
 	let as_type = if p.at(&Token::KwAs) {
@@ -879,17 +900,21 @@ fn parse_as_expr(p: &mut Parser) -> Result<AsExpr, ParseError> {
 	p.expect(Token::Comma)?;
 
 	let mode = match &p.current {
-		Some(Token::KwStrict) => {
+		Some(Token::KwMust) => {
 			p.advance();
-			ConvertMode::Strict
+			Modal::Must
 		}
-		Some(Token::KwLazy) => {
+		Some(Token::KwShould) => {
 			p.advance();
-			ConvertMode::Lazy
+			Modal::Should
+		}
+		Some(Token::KwMay) => {
+			p.advance();
+			Modal::May
 		}
 		other => {
 			return Err(ParseError {
-				message: format!("expected 'strict' or 'lazy', got {:?}", other),
+				message: format!("expected 'must', 'should', or 'may', got {:?}", other),
 				span: p.span.clone(),
 			});
 		}
@@ -1913,6 +1938,128 @@ rule test {
 						assert_eq!(m.arms.len(), 2);
 						assert!(matches!(m.arms[0].patterns[0], MatchPattern::Variant(_)));
 						assert!(matches!(m.arms[1].patterns[0], MatchPattern::Else));
+					}
+					_ => panic!("expected match"),
+				},
+				_ => panic!("expected let"),
+			},
+			_ => panic!("expected rule"),
+		}
+	}
+
+	#[test]
+	fn parse_match_with_as_must() {
+		let src = r#"
+namespace my {}
+
+rule test {
+    let x = match query(v/value) as(my:Type, must) {
+        A => true,
+        else => false
+    }
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		match &ast.items[1] {
+			Item::Rule(r) => match &r.body[0] {
+				Statement::Let(l) => match &l.value {
+					Expr::Match(m) => {
+						assert!(m.as_type.is_some());
+						let as_expr = m.as_type.as_ref().unwrap();
+						assert_eq!(as_expr.target_type.namespace, Some("my".to_string()));
+						assert_eq!(as_expr.target_type.name, "Type");
+						assert_eq!(as_expr.mode, Modal::Must);
+					}
+					_ => panic!("expected match"),
+				},
+				_ => panic!("expected let"),
+			},
+			_ => panic!("expected rule"),
+		}
+	}
+
+	#[test]
+	fn parse_match_with_as_should() {
+		let src = r#"
+namespace my {}
+
+rule test {
+    let x = match query(v/value) as(my:Type, should) {
+        A => true,
+        else => false
+    }
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		match &ast.items[1] {
+			Item::Rule(r) => match &r.body[0] {
+				Statement::Let(l) => match &l.value {
+					Expr::Match(m) => {
+						assert!(m.as_type.is_some());
+						let as_expr = m.as_type.as_ref().unwrap();
+						assert_eq!(as_expr.mode, Modal::Should);
+					}
+					_ => panic!("expected match"),
+				},
+				_ => panic!("expected let"),
+			},
+			_ => panic!("expected rule"),
+		}
+	}
+
+	#[test]
+	fn parse_match_with_as_may() {
+		let src = r#"
+namespace my {}
+
+rule test {
+    let x = match query(v/value) as(my:Type, may) {
+        A => true,
+        else => false
+    }
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		match &ast.items[1] {
+			Item::Rule(r) => match &r.body[0] {
+				Statement::Let(l) => match &l.value {
+					Expr::Match(m) => {
+						assert!(m.as_type.is_some());
+						let as_expr = m.as_type.as_ref().unwrap();
+						assert_eq!(as_expr.mode, Modal::May);
+					}
+					_ => panic!("expected match"),
+				},
+				_ => panic!("expected let"),
+			},
+			_ => panic!("expected rule"),
+		}
+	}
+
+	#[test]
+	fn parse_match_without_as() {
+		let src = r#"
+rule test {
+    let x = match query(v/value) {
+        A => true,
+        else => false
+    }
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		match &ast.items[0] {
+			Item::Rule(r) => match &r.body[0] {
+				Statement::Let(l) => match &l.value {
+					Expr::Match(m) => {
+						assert!(m.as_type.is_none());
 					}
 					_ => panic!("expected match"),
 				},
