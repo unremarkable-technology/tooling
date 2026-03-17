@@ -887,7 +887,7 @@ impl RuleEngine {
 				}
 
 				if is_valid {
-					Ok(EvalResult::Literal("true".to_string()))
+					Ok(EvalResult::Literal(value_str))
 				} else {
 					Ok(EvalResult::Empty)
 				}
