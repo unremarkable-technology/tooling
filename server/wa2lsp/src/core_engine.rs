@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::{
 use crate::{
 	iaac::cloudformation::{cfn_ir::types::CfnTemplate, spec_store::SpecStore},
 	intents::{
-		kernel::Kernel,
+		kernel::{AssertSeverity, Kernel},
 		model::Model,
 		vendor::{DocumentFormat, Method, Vendor, get_projector},
 	},
@@ -190,13 +190,7 @@ impl CoreEngine {
 					.or_else(|| result.model.get_range(failure.entity))?;
 
 				// Map severity
-				let severity = if failure.severity.contains("Error") {
-					DiagnosticSeverity::ERROR
-				} else if failure.severity.contains("Warning") {
-					DiagnosticSeverity::WARNING
-				} else {
-					DiagnosticSeverity::INFORMATION
-				};
+				let severity = Self::to_lsp_severity(failure.severity);
 
 				// Build message
 				let message = failure
@@ -244,6 +238,14 @@ impl CoreEngine {
 		}
 
 		diagnostics
+	}
+
+	fn to_lsp_severity(severity: AssertSeverity) -> DiagnosticSeverity {
+		match severity {
+			AssertSeverity::Error => DiagnosticSeverity::ERROR,
+			AssertSeverity::Warning => DiagnosticSeverity::WARNING,
+			AssertSeverity::Info => DiagnosticSeverity::INFORMATION,
+		}
 	}
 
 	pub fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {

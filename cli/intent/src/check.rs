@@ -12,7 +12,7 @@ use url::Url;
 
 use wa2lsp::iaac::cloudformation::cfn_ir::types::CfnTemplate;
 use wa2lsp::iaac::cloudformation::spec_cache::load_default_spec_store;
-use wa2lsp::intents::kernel::Kernel;
+use wa2lsp::intents::kernel::{AssertSeverity, Kernel};
 use wa2lsp::intents::vendor::{DocumentFormat, Method, Vendor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +21,16 @@ enum Status {
 	Warn,
 	Fail,
 	Blocked,
+}
+
+impl From<AssertSeverity> for Status {
+	fn from(s: AssertSeverity) -> Self {
+		match s {
+			AssertSeverity::Error => Status::Fail,
+			AssertSeverity::Warning => Status::Warn,
+			AssertSeverity::Info => Status::Pass, // or a separate Info if you want later
+		}
+	}
 }
 
 struct Reporter {
@@ -196,14 +206,22 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>) -> ExitCode
 		Ok(spec_store) => {
 			let spec_diags = template.validate_against_spec(&spec_store);
 			if spec_diags.is_empty() {
-				out.setup(Status::Pass, "Validate CloudFormation against specification", None);
+				out.setup(
+					Status::Pass,
+					"Validate CloudFormation against specification",
+					None,
+				);
 			} else {
 				let detail = spec_diags
 					.into_iter()
 					.map(|d| d.message)
 					.collect::<Vec<_>>()
 					.join("\n\n");
-				out.setup(Status::Fail, "Validate CloudFormation against specification", Some(&detail));
+				out.setup(
+					Status::Fail,
+					"Validate CloudFormation against specification",
+					Some(&detail),
+				);
 				return ExitCode::FAILURE;
 			}
 		}
@@ -321,11 +339,12 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>) -> ExitCode
 			Some(detail_parts.join("\n\n"))
 		};
 
+      let label = format!("{} ({})", failure.assertion, failure.severity.label());
 		out.tree(
 			&profile_prefix,
 			is_last,
-			Status::Fail,
-			&failure.assertion,
+			Status::from(failure.severity),
+			&label,
 			detail.as_deref(),
 		);
 	}

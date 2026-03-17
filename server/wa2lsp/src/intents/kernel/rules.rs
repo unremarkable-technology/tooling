@@ -379,18 +379,21 @@ impl RuleEngine {
 		}
 
 		// Modal (as entity reference)
-		let modal_name = match modal {
-			Modal::Must => "core:Error",
-			Modal::Should => "core:Warning",
-			Modal::May => "core:Info",
-		};
 		model
-			.apply_to(failure, "core:severity", modal_name)
+			.apply_to(failure, "core:severity", Self::severity_for_modal(modal))
 			.map_err(|e| RuleError {
 				message: format!("failed to set severity: {}", e),
 			})?;
 
 		Ok(())
+	}
+
+	fn severity_for_modal(modal: Modal) -> &'static str {
+		match modal {
+			Modal::Must => "core:Error",
+			Modal::Should => "core:Warning",
+			Modal::May => "core:Info",
+		}
 	}
 
 	/// Check if a result satisfies an obligation

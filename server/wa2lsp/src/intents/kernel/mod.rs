@@ -53,10 +53,47 @@ pub struct AnalysisResult {
 pub struct AssertFailure {
 	pub entity: crate::intents::model::EntityId,
 	pub assertion: String,
-	pub severity: String,
+	pub severity: AssertSeverity,
 	pub subject: Option<crate::intents::model::EntityId>,
 	pub area: Option<crate::intents::model::EntityId>,
 	pub message: Option<String>,
+}
+
+/// Shared severity for WA2 findings.
+/// This is the canonical severity used by kernel, CLI, and adapters like LSP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertSeverity {
+	Error,
+	Warning,
+	Info,
+}
+
+impl AssertSeverity {
+	/// Parse from model qualified-name values like `core:Error`.
+	pub fn from_model_qname(name: &str) -> Option<Self> {
+		match name {
+			"core:Error" => Some(Self::Error),
+			"core:Warning" => Some(Self::Warning),
+			"core:Info" => Some(Self::Info),
+			_ => None,
+		}
+	}
+
+	pub fn as_model_qname(self) -> &'static str {
+		match self {
+			Self::Error => "core:Error",
+			Self::Warning => "core:Warning",
+			Self::Info => "core:Info",
+		}
+	}
+
+	pub fn label(self) -> &'static str {
+		match self {
+			Self::Error => "error",
+			Self::Warning => "warning",
+			Self::Info => "info",
+		}
+	}
 }
 
 /// Kernel - the WA2 analysis engine
@@ -532,7 +569,9 @@ impl Kernel {
 						.and_then(|p| model.get(entity, p))
 						.and_then(|v| v.as_entity())
 						.map(|e| model.qualified_name(e))
-						.unwrap_or_else(|| "error".to_string());
+						.as_deref()
+						.and_then(AssertSeverity::from_model_qname)
+						.unwrap_or(AssertSeverity::Error);
 
 					let subject = subject_pred
 						.and_then(|p| model.get(entity, p))
