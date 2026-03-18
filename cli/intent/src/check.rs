@@ -1,4 +1,4 @@
-// check.rs
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
@@ -13,6 +13,7 @@ use url::Url;
 use wa2lsp::iaac::cloudformation::cfn_ir::types::CfnTemplate;
 use wa2lsp::iaac::cloudformation::spec_cache::load_default_spec_store;
 use wa2lsp::intents::kernel::{AssertSeverity, Kernel};
+use wa2lsp::intents::model::{EntityId, Model, Value};
 use wa2lsp::intents::vendor::{DocumentFormat, Method, Vendor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,8 +21,6 @@ enum Status {
 	Pass,
 	Warn,
 	Fail,
-
-	#[allow(unused)]
 	Blocked,
 }
 
@@ -30,7 +29,7 @@ impl From<AssertSeverity> for Status {
 		match s {
 			AssertSeverity::Error => Status::Fail,
 			AssertSeverity::Warning => Status::Warn,
-			AssertSeverity::Info => Status::Pass, // or a separate Info if you want later
+			AssertSeverity::Info => Status::Pass,
 		}
 	}
 }
@@ -79,7 +78,7 @@ impl Reporter {
 		println!("{}", "-".repeat(title.len()));
 	}
 
-	fn setup(&self, status: Status, label: &str, detail: Option<&str>) {
+	fn prepare(&self, status: Status, label: &str, detail: Option<&str>) {
 		self.status_node("", true, status, label, detail);
 	}
 
@@ -153,19 +152,23 @@ impl Reporter {
 	}
 
 	fn write_wrapped_block(&self, prefix: &str, text: &str) {
-		for para in text.split("\n\n") {
-			let trimmed = para.trim();
-			if trimmed.is_empty() {
-				continue;
-			}
+		let paragraphs: Vec<&str> = text
+			.split("\n\n")
+			.map(str::trim)
+			.filter(|p| !p.is_empty())
+			.collect();
 
+		for (idx, para) in paragraphs.iter().enumerate() {
 			let available = self.width.saturating_sub(UnicodeWidthStr::width(prefix));
-
 			let options = Options::new(available.max(20));
-			for line in wrap(trimmed, options) {
+
+			for line in wrap(para, options) {
 				println!("{prefix}{}", line);
 			}
-			println!("{prefix}");
+
+			if idx + 1 != paragraphs.len() {
+				println!("{prefix}");
+			}
 		}
 	}
 
@@ -218,12 +221,82 @@ impl Reporter {
 	}
 }
 
-pub async fn run(profile: &str, target: &Path, entry: Option<&Path>, graph: bool) -> ExitCode {
+struct ValidationReport {
+	status: Status,
+	label: String,
+	detail: Option<String>,
+}
+
+async fn run_validation(target_text: String, target_uri: Url) -> ValidationReport {
+	let format = DocumentFormat::from_language_id_or_path(None, &target_uri);
+
+	let template = match format {
+		DocumentFormat::Json => CfnTemplate::from_json(&target_text, &target_uri),
+		DocumentFormat::Yaml => CfnTemplate::from_yaml(&target_text, &target_uri),
+	};
+
+	let template = match template {
+		Ok(t) => t,
+		Err(diags) => {
+			let detail = diags
+				.into_iter()
+				.map(|d| d.message)
+				.collect::<Vec<_>>()
+				.join("\n\n");
+
+			return ValidationReport {
+				status: Status::Fail,
+				label: "Parse CloudFormation template".to_string(),
+				detail: Some(detail),
+			};
+		}
+	};
+
+	let spec_store = match load_default_spec_store().await {
+		Ok(store) => store,
+		Err(e) => {
+			return ValidationReport {
+				status: Status::Fail,
+				label: "Load CloudFormation specification".to_string(),
+				detail: Some(e.to_string()),
+			};
+		}
+	};
+
+	let diags = template.validate_against_spec(&spec_store);
+	if diags.is_empty() {
+		ValidationReport {
+			status: Status::Pass,
+			label: "Validate CloudFormation against specification".to_string(),
+			detail: None,
+		}
+	} else {
+		let detail = diags
+			.into_iter()
+			.map(|d| d.message)
+			.collect::<Vec<_>>()
+			.join("\n\n");
+
+		ValidationReport {
+			status: Status::Fail,
+			label: "Validate CloudFormation against specification".to_string(),
+			detail: Some(detail),
+		}
+	}
+}
+
+pub async fn run(
+	profile: &str,
+	target: &Path,
+	entry: Option<&Path>,
+	graph: bool,
+	validate: bool,
+) -> ExitCode {
 	let out = Reporter::new();
-	out.section("SETUP");
+	out.section("PREPARE");
 
 	if !target.exists() {
-		out.setup(
+		out.prepare(
 			Status::Fail,
 			&format!("Read target {}", target.display()),
 			Some("Target file not found."),
@@ -233,7 +306,7 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>, graph: bool
 
 	let target_text = match fs::read_to_string(target) {
 		Ok(t) => {
-			out.setup(
+			out.prepare(
 				Status::Pass,
 				&format!("Read target {}", target.display()),
 				None,
@@ -241,7 +314,7 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>, graph: bool
 			t
 		}
 		Err(e) => {
-			out.setup(
+			out.prepare(
 				Status::Fail,
 				&format!("Read target {}", target.display()),
 				Some(&e.to_string()),
@@ -259,68 +332,34 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>, graph: bool
 
 	let format = DocumentFormat::from_language_id_or_path(None, &target_uri);
 
-	let template = match format {
-		DocumentFormat::Json => CfnTemplate::from_json(&target_text, &target_uri),
-		DocumentFormat::Yaml => CfnTemplate::from_yaml(&target_text, &target_uri),
-	};
+	let validation_task = if validate {
+		out.prepare(
+			Status::Blocked,
+			"Schedule CloudFormation validation",
+			Some("Validation will run concurrently and report after results."),
+		);
 
-	let template = match template {
-		Ok(t) => {
-			out.setup(Status::Pass, "Parse CloudFormation template", None);
-			t
-		}
-		Err(diags) => {
-			let detail = diags
-				.into_iter()
-				.map(|d| d.message)
-				.collect::<Vec<_>>()
-				.join("\n\n");
-			out.setup(Status::Fail, "Parse CloudFormation template", Some(&detail));
-			return ExitCode::FAILURE;
-		}
+		let validation_text = target_text.clone();
+		let validation_uri = target_uri.clone();
+		Some(tokio::spawn(async move {
+			run_validation(validation_text, validation_uri).await
+		}))
+	} else {
+		out.prepare(
+			Status::Blocked,
+			"CloudFormation validation",
+			Some("Disabled with --novalidation."),
+		);
+		None
 	};
-
-	match load_default_spec_store().await {
-		Ok(spec_store) => {
-			let spec_diags = template.validate_against_spec(&spec_store);
-			if spec_diags.is_empty() {
-				out.setup(
-					Status::Pass,
-					"Validate CloudFormation against specification",
-					None,
-				);
-			} else {
-				let detail = spec_diags
-					.into_iter()
-					.map(|d| d.message)
-					.collect::<Vec<_>>()
-					.join("\n\n");
-				out.setup(
-					Status::Fail,
-					"Validate CloudFormation against specification",
-					Some(&detail),
-				);
-				return ExitCode::FAILURE;
-			}
-		}
-		Err(e) => {
-			out.setup(
-				Status::Warn,
-				"Load CloudFormation spec",
-				Some(&format!(
-					"Could not load CloudFormation specification: {e}\n\nSkipping specification validation."
-				)),
-			);
-		}
-	}
 
 	let skip_quickstart = entry.is_some();
 	let mut kernel = Kernel::new(skip_quickstart);
-	out.setup(Status::Pass, "Initialise kernel", None);
+	out.prepare(Status::Pass, "Initialise kernel", None);
 
 	if let Some(entry_path) = entry {
 		if !entry_path.exists() {
-			out.setup(
+			out.prepare(
 				Status::Fail,
 				&format!("Read intent entry {}", entry_path.display()),
 				Some("Entry file not found."),
@@ -330,14 +369,14 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>, graph: bool
 
 		match kernel.load_intent(entry_path) {
 			Ok(_) => {
-				out.setup(
+				out.prepare(
 					Status::Pass,
 					&format!("Parse intent entry {}", entry_path.display()),
 					None,
 				);
 			}
 			Err(e) => {
-				out.setup(
+				out.prepare(
 					Status::Fail,
 					&format!("Parse intent entry {}", entry_path.display()),
 					Some(&e.to_string()),
@@ -348,14 +387,14 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>, graph: bool
 	}
 
 	if let Err(e) = kernel.set_profile(profile.to_string()) {
-		out.setup(
+		out.prepare(
 			Status::Fail,
 			&format!("Select profile {profile}"),
 			Some(&e.to_string()),
 		);
 		return ExitCode::FAILURE;
 	}
-	out.setup(Status::Pass, &format!("Select profile {profile}"), None);
+	out.prepare(Status::Pass, &format!("Select profile {profile}"), None);
 
 	let result = kernel.analyse(
 		&target_text,
@@ -367,7 +406,7 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>, graph: bool
 
 	let analysis = match result {
 		Ok(analysis) => {
-			out.setup(Status::Pass, "Run analysis", None);
+			out.prepare(Status::Pass, "Run analysis", None);
 			analysis
 		}
 		Err(diags) => {
@@ -376,14 +415,14 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>, graph: bool
 				.map(|d| d.message)
 				.collect::<Vec<_>>()
 				.join("\n\n");
-			out.setup(Status::Fail, "Run analysis", Some(&detail));
+			out.prepare(Status::Fail, "Run analysis", Some(&detail));
 			return ExitCode::FAILURE;
 		}
 	};
 
 	out.section("RESULTS");
 
-	if analysis.failures.is_empty() {
+	let mut exit_code = if analysis.failures.is_empty() {
 		out.tree(
 			"",
 			true,
@@ -391,85 +430,106 @@ pub async fn run(profile: &str, target: &Path, entry: Option<&Path>, graph: bool
 			&format!("Profile: {profile}"),
 			Some("Target satisfies the selected intent profile."),
 		);
+		ExitCode::SUCCESS
+	} else {
+		out.tree("", true, Status::Fail, &format!("Profile: {profile}"), None);
+		let profile_prefix = Reporter::child_prefix("", true);
 
-		if graph {
-			out.section("GRAPH");
-			print_model_graph(&out, &analysis.model);
+		for (idx, failure) in analysis.failures.iter().enumerate() {
+			let is_last = idx + 1 == analysis.failures.len();
+
+			let mut detail_parts = Vec::new();
+
+			if let Some(subject) = failure.subject {
+				let name = analysis.model.qualified_name(subject);
+				detail_parts.push(format!("Subject: {name}"));
+			}
+
+			if let Some(location) = analysis.resolve_failure_location(failure) {
+				let display_path = location
+					.uri
+					.to_file_path()
+					.ok()
+					.and_then(|p| {
+						std::env::current_dir()
+							.ok()
+							.and_then(|cwd| p.strip_prefix(&cwd).ok().map(|rel| rel.to_path_buf()))
+							.or(Some(p))
+					})
+					.map(|p| p.display().to_string())
+					.unwrap_or_else(|| location.uri.to_string());
+
+				detail_parts.push(format!(
+					"Location: {}: line {}",
+					display_path,
+					location.range.start.line + 1,
+				));
+			}
+
+			if let Some(area_id) = failure.area {
+				let area = analysis.model.qualified_name(area_id);
+				detail_parts.push(format!("Area: {area}"));
+			}
+
+			if let Some(msg) = &failure.message {
+				detail_parts.push(format!("Message: {msg}"));
+			}
+
+			let detail = if detail_parts.is_empty() {
+				None
+			} else {
+				Some(detail_parts.join("\n"))
+			};
+
+			let label = format!("{} ({})", failure.assertion, failure.severity.label());
+			out.tree(
+				&profile_prefix,
+				is_last,
+				Status::from(failure.severity),
+				&label,
+				detail.as_deref(),
+			);
 		}
 
-		return ExitCode::SUCCESS;
-	}
-
-	out.tree("", true, Status::Fail, &format!("Profile: {profile}"), None);
-	let profile_prefix = Reporter::child_prefix("", true);
-
-	for (idx, failure) in analysis.failures.iter().enumerate() {
-		let is_last = idx + 1 == analysis.failures.len();
-
-		let mut detail_parts = Vec::new();
-
-		if let Some(subject) = failure.subject {
-			let name = analysis.model.qualified_name(subject);
-			detail_parts.push(format!("Subject: {name}"));
-		}
-
-		if let Some(location) = analysis.resolve_failure_location(failure) {
-			// make location url into file path - relative to current directory
-			let display_path = location
-				.uri
-				.to_file_path()
-				.ok()
-				.and_then(|p| {
-					std::env::current_dir()
-						.ok()
-						.and_then(|cwd| p.strip_prefix(&cwd).ok().map(|rel| rel.to_path_buf()))
-						.or(Some(p))
-				})
-				.map(|p| p.display().to_string())
-				.unwrap_or_else(|| location.uri.to_string());
-
-			detail_parts.push(format!(
-				"Location: {}: line {}",
-				display_path,
-				location.range.start.line + 1,
-			));
-		}
-
-		if let Some(area_id) = failure.area {
-			let area = analysis.model.qualified_name(area_id);
-			detail_parts.push(format!("Area: {area}"));
-		}
-
-		if let Some(msg) = &failure.message {
-			detail_parts.push(format!("Message: {msg}"));
-		}
-
-		let detail = if detail_parts.is_empty() {
-			None
-		} else {
-			Some(detail_parts.join("\n"))
-		};
-
-		let label = format!("{} ({})", failure.assertion, failure.severity.label());
-		out.tree(
-			&profile_prefix,
-			is_last,
-			Status::from(failure.severity),
-			&label,
-			detail.as_deref(),
-		);
-	}
+		ExitCode::FAILURE
+	};
 
 	if graph {
 		out.section("GRAPH");
 		print_model_graph(&out, &analysis.model);
 	}
 
-	ExitCode::FAILURE
-}
+	if let Some(task) = validation_task {
+		out.section("VALIDATION");
 
-use std::collections::HashSet;
-use wa2lsp::intents::model::{EntityId, Model, Value};
+		match task.await {
+			Ok(report) => {
+				out.tree(
+					"",
+					true,
+					report.status,
+					&report.label,
+					report.detail.as_deref(),
+				);
+				if report.status == Status::Fail {
+					exit_code = ExitCode::FAILURE;
+				}
+			}
+			Err(e) => {
+				out.tree(
+					"",
+					true,
+					Status::Fail,
+					"Run CloudFormation validation",
+					Some(&e.to_string()),
+				);
+				exit_code = ExitCode::FAILURE;
+			}
+		}
+	}
+
+	exit_code
+}
 
 fn classify_graph_node(model: &Model, node: EntityId) -> GraphNodeKind {
 	let type_names: Vec<String> = model
@@ -481,7 +541,6 @@ fn classify_graph_node(model: &Model, node: EntityId) -> GraphNodeKind {
 	let has = |name: &str| type_names.iter().any(|t| t == name);
 	let has_prefix = |prefix: &str| type_names.iter().any(|t| t.starts_with(prefix));
 
-	// First priority: core architectural semantics
 	if has("core:Run") {
 		return GraphNodeKind::Run;
 	}
@@ -498,7 +557,6 @@ fn classify_graph_node(model: &Model, node: EntityId) -> GraphNodeKind {
 		return GraphNodeKind::Evidence;
 	}
 
-	// Second priority: CloudFormation/source semantics
 	if has("aws:cfn:Template") {
 		return GraphNodeKind::Template;
 	}
@@ -527,7 +585,6 @@ fn classify_graph_node(model: &Model, node: EntityId) -> GraphNodeKind {
 		return GraphNodeKind::Intrinsic;
 	}
 
-	// Fallback
 	if model.entity(node).localname.is_none() {
 		GraphNodeKind::Blank
 	} else {
