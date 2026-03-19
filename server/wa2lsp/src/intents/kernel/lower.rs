@@ -649,4 +649,46 @@ derive good {
 		assert!(result.is_ok());
 		assert_eq!(result.unwrap().derives.len(), 1);
 	}
+
+	#[test]
+	fn qualify_as_type_in_derive_inside_namespace() {
+		let src = r#"
+namespace my {
+    enum DataCriticality {
+        Low,
+        High
+    }
+    
+    derive test_derive {
+        let x = query(tag/value) as(DataCriticality)
+    }
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		let mut model = Model::bootstrap();
+		let mut lower = Lower::new(&mut model, "").unwrap();
+		let result = lower.lower(&ast).unwrap();
+
+		// The derive's as(DataCriticality) should be qualified to as(my:DataCriticality)
+		assert_eq!(result.derives.len(), 1);
+		let derive = &result.derives[0];
+
+		// Find the let statement with as() expression
+		match &derive.body[0] {
+			Statement::Let(let_stmt) => match &let_stmt.value {
+				Expr::As(as_validation) => {
+					assert_eq!(
+						as_validation.target_type.namespace,
+						Some("my".to_string()),
+						"as(DataCriticality) should be qualified to my:DataCriticality"
+					);
+					assert_eq!(as_validation.target_type.name, "DataCriticality");
+				}
+				_ => panic!("expected As expression, got {:?}", let_stmt.value),
+			},
+			_ => panic!("expected Let statement"),
+		}
+	}
 }

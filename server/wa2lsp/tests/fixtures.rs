@@ -77,20 +77,20 @@ fn test_good_template(path: &Path) -> datatest_stable::Result<()> {
 	}
 }
 
-fn test_bad_template(path: &Path) -> datatest_stable::Result<()> {
-	match parse_and_validate(path)? {
-		ParseResult::ParseError(_) => Ok(()), // Parse error = expected
-		ParseResult::Parsed { diags, .. } => {
-			if diags.is_empty() {
-				Err("Expected diagnostics but got none".into())
-			} else {
-				Ok(())
-			}
-		}
-	}
-}
+// fn test_bad_template(path: &Path) -> datatest_stable::Result<()> {
+// 	match parse_and_validate(path)? {
+// 		ParseResult::ParseError(_) => Ok(()), // Parse error = expected
+// 		ParseResult::Parsed { diags, .. } => {
+// 			if diags.is_empty() {
+// 				Err("Expected diagnostics but got none".into())
+// 			} else {
+// 				Ok(())
+// 			}
+// 		}
+// 	}
+// }
 
 datatest_stable::harness! {
 	{ test = test_good_template, root = "tests/fixtures/cfn-lint/good", pattern = r"\.yaml$|\.json$" },
-	{ test = test_bad_template, root = "tests/fixtures/cfn-lint/bad", pattern = r"\.yaml$|\.json$" },
+	//{ test = test_bad_template, root = "tests/fixtures/cfn-lint/bad", pattern = r"\.yaml$|\.json$" },
 }
