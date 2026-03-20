@@ -664,7 +664,7 @@ fn parse_add_stmt_keyword(p: &mut Parser) -> Result<AddStmt, ParseError> {
 	})
 }
 
-fn parse_must_metadata(p: &mut Parser) -> Result<MustMetadata, ParseError> {
+fn parse_must_metadata(p: &mut Parser) -> Result<ModalMetadata, ParseError> {
 	let start = p.span.start;
 	p.expect(Token::LBrace)?;
 
@@ -711,7 +711,7 @@ fn parse_must_metadata(p: &mut Parser) -> Result<MustMetadata, ParseError> {
 
 	p.expect(Token::RBrace)?;
 
-	Ok(MustMetadata {
+	Ok(ModalMetadata {
 		subject,
 		area,
 		message,

@@ -194,7 +194,7 @@ impl QueryEngine {
 	}
 
 	/// Check if entity is a type (has wa2:type = wa2:Type)
-	fn is_type(&self, model: &Model, entity: EntityId) -> bool {
+   pub(crate) fn is_type(&self, model: &Model, entity: EntityId) -> bool {
 		let Some(wa2_type) = model.resolve("wa2:Type") else {
 			return false;
 		};

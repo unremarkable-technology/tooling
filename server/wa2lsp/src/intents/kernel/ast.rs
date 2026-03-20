@@ -215,13 +215,13 @@ pub struct AssertStmt {
 pub struct ModalStmt {
 	pub modal: Modal,
 	pub expr: Expr,
-	pub metadata: Option<MustMetadata>,
+	pub metadata: Option<ModalMetadata>,
 	pub span: Span,
 }
 
 /// Metadata block for must statement
 #[derive(Debug, Clone)]
-pub struct MustMetadata {
+pub struct ModalMetadata {
 	pub subject: Option<Expr>,
 	pub area: Option<QualifiedName>,
 	pub message: Option<String>,
