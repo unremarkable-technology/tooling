@@ -3,6 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as https from 'https';
 import * as vscode from 'vscode';
+import * as tar from 'tar';
+import extractZip from 'extract-zip';
 import {
    LanguageClient,
    LanguageClientOptions,
@@ -197,12 +199,10 @@ function constructLspDownloadUrl(context: vscode.ExtensionContext, extensionVers
       throw new Error('package.json repository.url is missing or invalid');
    }
 
-   // tidy any "git+https://" into "https://"
    repoUrl = repoUrl
       .replace(/^git\+/, '')
       .replace(/\.git$/, '');
 
-   // removing optional trailing /
    const normalizedRepo = repoUrl.endsWith('/') ? repoUrl.slice(0, -1) : repoUrl;
    const releaseUrl = `${normalizedRepo}/releases/download/v${extensionVersion}/${platformAsset.archiveName}`;
    return releaseUrl;
@@ -305,40 +305,14 @@ async function extractArchive(args: {
    outputChannel.appendLine(`WA2: Extracting ${path.basename(archivePath)}`);
 
    if (archiveType === 'zip') {
-      const command = buildPowerShellZipExtractCommand(archivePath, destinationDir);
-      await runShellCommand(command);
+      await extractZip(archivePath, { dir: destinationDir });
       return;
    }
 
-   const tarBinary = process.platform === 'win32' ? 'tar.exe' : 'tar';
-   const command = `"${tarBinary}" -xzf "${archivePath}" -C "${destinationDir}"`;
-   await runShellCommand(command);
-}
-
-function buildPowerShellZipExtractCommand(archivePath: string, destinationDir: string): string {
-   const escapedArchive = archivePath.replace(/'/g, "''");
-   const escapedDestination = destinationDir.replace(/'/g, "''");
-
-   return [
-      'powershell',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      `"Expand-Archive -LiteralPath '${escapedArchive}' -DestinationPath '${escapedDestination}' -Force"`
-   ].join(' ');
-}
-
-async function runShellCommand(command: string): Promise<void> {
-   const { exec } = await import('child_process');
-
-   await new Promise<void>((resolve, reject) => {
-      exec(command, (error, stdout, stderr) => {
-         if (error) {
-            reject(new Error(stderr || stdout || error.message));
-            return;
-         }
-         resolve();
-      });
+   await tar.x({
+      file: archivePath,
+      cwd: destinationDir,
+      gzip: true,
    });
 }
 
