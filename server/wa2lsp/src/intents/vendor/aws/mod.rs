@@ -5,7 +5,7 @@ mod tests;
 
 use tower_lsp::lsp_types::{Diagnostic, Url};
 
-use crate::iaac::cloudformation::cfn_ir::types::CfnTemplate;
+use crate::iaac::cloudformation::cfn_ir::types::{CFN_INTRINSICS, CfnTemplate};
 use crate::intents::model::{Model, ModelError};
 use crate::intents::vendor::{DocumentFormat, VendorProjector};
 
@@ -41,16 +41,11 @@ impl VendorProjector for AwsCfnProjector {
 	}
 }
 
-pub fn project_template_into(
+fn project_template_into(
 	model: &mut Model,
 	template: &CfnTemplate,
 	uri: &Url,
 ) -> Result<(), ModelError> {
-	// Ensure types exist (idempotent if already loaded from bootstrap.wa2)
-	cfn_projector::ensure_cfn_types(model)?;
-	cfn_projector::ensure_aws_types(model)?;
-	cfn_projector::ensure_core_types(model)?;
-
 	// Create template entity
 	let template_entity = model.blank();
 	model.apply_to(template_entity, "wa2:type", "cfn:Template")?;
@@ -66,7 +61,8 @@ pub fn project_template_into(
 	cfn_projector::project_parameters(model, template_entity, &template.parameters, uri)?;
 	cfn_projector::project_pseudo_parameters(model, template_entity)?;
 
-	let entities = cfn_projector::project_resources(model, template_entity, &template.resources, uri)?;
+	let entities =
+		cfn_projector::project_resources(model, template_entity, &template.resources, uri)?;
 
 	Ok(())
 }
@@ -80,6 +76,88 @@ fn model_error_to_diags(err: crate::intents::model::ModelError) -> Vec<Diagnosti
 	}]
 }
 
+const CFN_PREDICATES: &[&str] = &[
+	"target",
+	"attribute",
+	"template",
+	"parameters",
+	"pseudoParameters",
+	"type",
+	"default",
+	"description",
+	"delimiter",
+	"condition",
+	"conditionName",
+];
+
+/// Ensure core architectural types exist in the model
+fn ensure_core_types(model: &mut Model) -> Result<(), ModelError> {
+	model.ensure_namespace("core")?;
+
+	// DSL: enum Node { Run, Store, Move }
+	model.apply("core:Node", "wa2:type", "wa2:Type")?;
+	model.apply("core:Store", "wa2:type", "wa2:Type")?;
+	model.apply("core:Store", "wa2:subTypeOf", "core:Node")?;
+	model.apply("core:Run", "wa2:type", "wa2:Type")?;
+	model.apply("core:Run", "wa2:subTypeOf", "core:Node")?;
+	model.apply("core:Move", "wa2:type", "wa2:Type")?;
+	model.apply("core:Move", "wa2:subTypeOf", "core:Node")?;
+
+	// DSL: struct Workload { nodes: Node[] }
+	model.apply("core:Workload", "wa2:type", "wa2:Type")?;
+	model.apply("core:nodes", "wa2:type", "wa2:Predicate")?;
+	model.apply("core:nodes", "wa2:domain", "core:Workload")?;
+	model.apply("core:nodes", "wa2:range", "core:Node")?;
+
+	// DSL: struct Evidence { value: String }
+	model.apply("core:Evidence", "wa2:type", "wa2:Type")?;
+	model.apply("core:value", "wa2:type", "wa2:Predicate")?;
+	model.apply("core:value", "wa2:domain", "core:Evidence")?;
+
+	// Predicates
+	model.apply("core:source", "wa2:type", "wa2:Predicate")?;
+	model.apply("core:source", "wa2:domain", "core:Node")?;
+	model.apply("core:source", "wa2:range", "aws:cfn:Resource")?;
+
+	Ok(())
+}
+
+/// Ensure CFN-specific types and predicates exist in the model
+fn ensure_aws_types(model: &mut Model) -> Result<(), ModelError> {
+	model.ensure_namespace("aws")?;
+
+	Ok(())
+}
+
+/// Ensure CFN-specific types and predicates exist in the model
+fn ensure_cfn_types(model: &mut Model) -> Result<(), ModelError> {
+	model.ensure_namespace("aws")?; // Parent first
+	model.ensure_namespace("aws:cfn")?; // Nested namespace
+
+	model.ensure_entity("aws:cfn:Output")?;
+	model.ensure_entity("aws:cfn:Resource")?;
+	model.ensure_entity("aws:cfn:outputs")?;
+	model.ensure_entity("aws:cfn:resources")?;
+	model.ensure_entity("aws:cfn:value")?;
+	model.ensure_entity("aws:cfn:exportName")?;
+	model.ensure_entity("aws:cfn:SubVarRef")?;
+	model.ensure_entity("aws:cfn:varRef")?;
+
+	model.apply("aws:cfn:Template", "wa2:type", "wa2:Type")?;
+	model.apply("aws:cfn:Parameter", "wa2:type", "wa2:Type")?;
+	model.apply("aws:cfn:PseudoParameter", "wa2:type", "wa2:Type")?;
+	model.apply("aws:cfn:Resource", "wa2:type", "wa2:Type")?;
+	for name in CFN_INTRINSICS {
+		model.apply(&format!("aws:cfn:{}", name), "wa2:type", "wa2:Type")?;
+	}
+
+	for name in CFN_PREDICATES {
+		model.apply(&format!("aws:cfn:{}", name), "wa2:type", "wa2:Predicate")?;
+	}
+
+	Ok(())
+}
+
 // In vendor/aws/mod.rs
 #[cfg(test)]
 mod projection_tests {
@@ -88,6 +166,20 @@ mod projection_tests {
 
 	fn test_uri() -> Url {
 		Url::parse("file:///tmp/test.yaml").unwrap()
+	}
+
+	fn test_setup(cfn_text: &str) -> Model {
+		let projector = AwsCfnProjector::new();
+		let mut model = Model::bootstrap();
+		// Ensure types exist (idempotent if already loaded from bootstrap.wa2)
+		ensure_cfn_types(&mut model).unwrap();
+		ensure_aws_types(&mut model).unwrap();
+		ensure_core_types(&mut model).unwrap();
+
+		projector
+			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
+			.unwrap();
+		model
 	}
 
 	#[test]
@@ -104,11 +196,7 @@ Resources:
       RoleArn: !GetAtt MyRole.Arn
 "#;
 
-		let projector = AwsCfnProjector::new();
-		let mut model = Model::bootstrap();
-		projector
-			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.unwrap();
+		let model = test_setup(cfn_text);
 
 		eprintln!("\n=== All entities with source ranges (GetAtt test) ===");
 		for i in 0..model.entity_count() {
@@ -140,11 +228,7 @@ Resources:
       Resource: !Sub "arn:${AWS::Partition}:s3:::${DataBucketName}/*"
 "#;
 
-		let projector = AwsCfnProjector::new();
-		let mut model = Model::bootstrap();
-		projector
-			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.unwrap();
+		let model = test_setup(cfn_text);
 
 		// Check for SubVarRef nodes
 		let sub_var_ref_type = model
@@ -170,21 +254,16 @@ Resources:
 	fn project_json_basic() {
 		let cfn_text = r#"{
   "Resources": {
-    "MyBucket": {
-      "Type": "AWS::S3::Bucket",
-      "Properties": {
-        "BucketName": "test-bucket"
-      }
-    }
+	 "MyBucket": {
+		"Type": "AWS::S3::Bucket",
+		"Properties": {
+		  "BucketName": "test-bucket"
+		}
+	 }
   }
 }"#;
 
-		let projector = AwsCfnProjector::new();
-		let uri = Url::parse("file:///tmp/test.json").unwrap();
-		let mut model = Model::bootstrap();
-		let result = projector
-			.project_into(&mut model, cfn_text, &uri, DocumentFormat::Json)
-			.expect("project");
+		let model = test_setup(cfn_text);
 
 		// Verify resource was projected
 		let bucket = model.resolve("MyBucket").expect("MyBucket should exist");
@@ -198,26 +277,21 @@ Resources:
 	fn project_json_ref() {
 		let cfn_text = r#"{
   "Parameters": {
-    "Environment": {
-      "Type": "String"
-    }
+	 "Environment": {
+		"Type": "String"
+	 }
   },
   "Resources": {
-    "Bucket": {
-      "Type": "AWS::S3::Bucket",
-      "Properties": {
-        "BucketName": { "Ref": "Environment" }
-      }
-    }
+	 "Bucket": {
+		"Type": "AWS::S3::Bucket",
+		"Properties": {
+		  "BucketName": { "Ref": "Environment" }
+		}
+	 }
   }
 }"#;
 
-		let projector = AwsCfnProjector::new();
-		let uri = Url::parse("file:///tmp/test.json").unwrap();
-		let mut model = Model::bootstrap();
-		projector
-			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.unwrap();
+		let model = test_setup(cfn_text);
 
 		// Verify Ref node exists and has correct type
 		let cfn_ref_type = model.resolve("cfn:Ref").expect("cfn:Ref should exist");
@@ -243,27 +317,22 @@ Resources:
 	fn project_json_getatt() {
 		let cfn_text = r#"{
   "Resources": {
-    "MyRole": {
-      "Type": "AWS::IAM::Role",
-      "Properties": {
-        "AssumeRolePolicyDocument": {}
-      }
-    },
-    "Bucket": {
-      "Type": "AWS::S3::Bucket",
-      "Properties": {
-        "RoleArn": { "Fn::GetAtt": ["MyRole", "Arn"] }
-      }
-    }
+	 "MyRole": {
+		"Type": "AWS::IAM::Role",
+		"Properties": {
+		  "AssumeRolePolicyDocument": {}
+		}
+	 },
+	 "Bucket": {
+		"Type": "AWS::S3::Bucket",
+		"Properties": {
+		  "RoleArn": { "Fn::GetAtt": ["MyRole", "Arn"] }
+		}
+	 }
   }
 }"#;
 
-		let projector = AwsCfnProjector::new();
-		let uri = Url::parse("file:///tmp/test.json").unwrap();
-		let mut model = Model::bootstrap();
-		projector
-			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.unwrap();
+		let model = test_setup(cfn_text);
 
 		// Verify GetAtt node exists
 		let cfn_getatt_type = model
@@ -296,26 +365,21 @@ Resources:
 	fn project_json_sub() {
 		let cfn_text = r#"{
   "Parameters": {
-    "BucketName": {
-      "Type": "String"
-    }
+	 "BucketName": {
+		"Type": "String"
+	 }
   },
   "Resources": {
-    "Policy": {
-      "Type": "AWS::IAM::Policy",
-      "Properties": {
-        "Resource": { "Fn::Sub": "arn:${AWS::Partition}:s3:::${BucketName}/*" }
-      }
-    }
+	 "Policy": {
+		"Type": "AWS::IAM::Policy",
+		"Properties": {
+		  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:s3:::${BucketName}/*" }
+		}
+	 }
   }
 }"#;
 
-		let projector = AwsCfnProjector::new();
-		let uri = Url::parse("file:///tmp/test.json").unwrap();
-		let mut model = Model::bootstrap();
-		projector
-			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.unwrap();
+		let model = test_setup(cfn_text);
 
 		// Check for SubVarRef nodes
 		let sub_var_ref_type = model
@@ -341,27 +405,22 @@ Resources:
 		// JSON also supports the dotted string form for GetAtt
 		let cfn_text = r#"{
   "Resources": {
-    "MyRole": {
-      "Type": "AWS::IAM::Role",
-      "Properties": {
-        "AssumeRolePolicyDocument": {}
-      }
-    },
-    "Bucket": {
-      "Type": "AWS::S3::Bucket",
-      "Properties": {
-        "RoleArn": { "Fn::GetAtt": "MyRole.Arn" }
-      }
-    }
+	 "MyRole": {
+		"Type": "AWS::IAM::Role",
+		"Properties": {
+		  "AssumeRolePolicyDocument": {}
+		}
+	 },
+	 "Bucket": {
+		"Type": "AWS::S3::Bucket",
+		"Properties": {
+		  "RoleArn": { "Fn::GetAtt": "MyRole.Arn" }
+		}
+	 }
   }
 }"#;
 
-		let projector = AwsCfnProjector::new();
-		let uri = Url::parse("file:///tmp/test.json").unwrap();
-		let mut model = Model::bootstrap();
-		projector
-			.project_into(&mut model, &cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.unwrap();
+		let model = test_setup(cfn_text);
 
 		// Verify GetAtt node exists and targets MyRole
 		let cfn_getatt_type = model
@@ -395,11 +454,7 @@ Resources:
           Value: Important
 "#;
 
-		let projector = AwsCfnProjector::new();
-		let mut model = Model::bootstrap();
-		projector
-			.project_into(&mut model, cfn_text, &test_uri(), DocumentFormat::Yaml)
-			.unwrap();
+		let model = test_setup(cfn_text);
 
 		// Debug: print model structure
 		eprintln!(

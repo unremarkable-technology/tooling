@@ -3828,4 +3828,523 @@ mod tests {
 			}
 		}
 	}
+
+	// ==================== Fixed-Point Iteration ====================
+	mod fixed_point {
+		use crate::intents::model::Value;
+
+		use super::*;
+
+		#[test]
+		fn derives_stop_when_no_changes() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
+
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
+
+			let initial_count = model.statement_count();
+
+			// Derive that adds nothing new (item already has type)
+			let derive = Derive {
+				name: "noop_derive".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![
+						// Try to add the same type again - should be idempotent
+						Statement::Add(AddStmt {
+							subject: Expr::Var("x".to_string(), 0..0),
+							predicate: QualifiedName {
+								namespace: Some("wa2".to_string()),
+								name: "type".to_string(),
+								span: 0..0,
+							},
+							object: Expr::QName(QualifiedName {
+								namespace: Some("test".to_string()),
+								name: "Item".to_string(),
+								span: 0..0,
+							}),
+							span: 0..0,
+						}),
+					],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let mut engine = RuleEngine::new();
+			engine.run_derives(&mut model, &[derive]).unwrap();
+
+			// Statement count should not have changed (idempotent add)
+			assert_eq!(
+				model.statement_count(),
+				initial_count,
+				"Idempotent derive should not add new statements"
+			);
+		}
+
+		#[test]
+		fn deferred_must_fails_if_still_unsatisfied() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("core").unwrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
+
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
+
+			// Rule requires NonExistent - will never be satisfied
+			let rule = Rule {
+				name: "require_impossible".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Must,
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![QueryStep {
+									axis: Axis::Child,
+									node_test: Some(QualifiedName {
+										namespace: Some("core".to_string()),
+										name: "NonExistent".to_string(),
+										span: 0..0,
+									}),
+									predicates: vec![],
+									span: 0..0,
+								}],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let mut engine = RuleEngine::new();
+			engine
+				.run_with_modals(&mut model, &[], &[rule], &HashMap::new())
+				.unwrap();
+
+			// Should have a failure
+			let failure_type = model.resolve("core:AssertFailure").unwrap();
+			let failures: Vec<_> = (0..model.entity_count())
+				.filter(|i| {
+					let e = EntityId(*i as u32);
+					model.has_type(e, failure_type)
+				})
+				.collect();
+
+			assert_eq!(
+				failures.len(),
+				1,
+				"Deferred must should fail if never satisfied"
+			);
+		}
+
+		#[test]
+		fn processed_tracking_prevents_duplicate_execution() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
+
+			let counter_type = model.ensure_entity("test:Counter").unwrap();
+			model
+				.apply_to(counter_type, "wa2:type", "wa2:Type")
+				.unwrap();
+
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
+
+			// Rule that creates a new Counter for each Item
+			// Without processed tracking, this would run infinitely or create many counters
+			let rule = Rule {
+				name: "create_counter".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Add(AddStmt {
+						subject: Expr::Blank(0..0),
+						predicate: QualifiedName {
+							namespace: Some("wa2".to_string()),
+							name: "type".to_string(),
+							span: 0..0,
+						},
+						object: Expr::QName(QualifiedName {
+							namespace: Some("test".to_string()),
+							name: "Counter".to_string(),
+							span: 0..0,
+						}),
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let mut engine = RuleEngine::new();
+			engine.run(&mut model, &[rule]).unwrap();
+
+			// Should have exactly one Counter (processed tracking prevents re-execution)
+			let counters: Vec<_> = (0..model.entity_count())
+				.filter(|i| {
+					let e = EntityId(*i as u32);
+					model.has_type(e, counter_type)
+				})
+				.collect();
+
+			assert_eq!(
+				counters.len(),
+				1,
+				"Processed tracking should prevent duplicate execution"
+			);
+		}
+
+		#[test]
+		fn derives_run_until_no_new_facts() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("test").unwrap();
+
+			let node_type = model.ensure_entity("test:Node").unwrap();
+			model.apply_to(node_type, "wa2:type", "wa2:Type").unwrap();
+
+			// Create a chain: A -> B -> C
+			let node_a = model.blank();
+			model.apply_entity(node_a, "wa2:type", node_type).unwrap();
+			model
+				.apply_literal(node_a, "test:reachable", "true")
+				.unwrap(); // A is initially reachable
+
+			let node_b = model.blank();
+			model.apply_entity(node_b, "wa2:type", node_type).unwrap();
+			model.apply_entity(node_a, "test:linksTo", node_b).unwrap();
+
+			let node_c = model.blank();
+			model.apply_entity(node_c, "wa2:type", node_type).unwrap();
+			model.apply_entity(node_b, "test:linksTo", node_c).unwrap();
+
+			// Derive: if X has reachable=true and X linksTo Y, then Y has reachable=true
+			// This requires multiple iterations to propagate through chain
+			let derive = Derive {
+				name: "propagate_reachable".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Node".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![QueryPredicate::Eq(
+									QueryPath {
+										steps: vec![QueryStep {
+											axis: Axis::Child,
+											node_test: Some(QualifiedName {
+												namespace: Some("test".to_string()),
+												name: "reachable".to_string(),
+												span: 0..0,
+											}),
+											predicates: vec![],
+											span: 0..0,
+										}],
+										span: 0..0,
+									},
+									Literal::String("true".to_string()),
+								)],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::For(ForStmt {
+						var: "y".to_string(),
+						collection: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![
+									QueryStep {
+										axis: Axis::Child,
+										node_test: Some(QualifiedName {
+											namespace: None,
+											name: "x".to_string(),
+											span: 0..0,
+										}),
+										predicates: vec![],
+										span: 0..0,
+									},
+									QueryStep {
+										axis: Axis::Child,
+										node_test: Some(QualifiedName {
+											namespace: Some("test".to_string()),
+											name: "linksTo".to_string(),
+											span: 0..0,
+										}),
+										predicates: vec![],
+										span: 0..0,
+									},
+								],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						body: vec![Statement::Add(AddStmt {
+							subject: Expr::Var("y".to_string(), 0..0),
+							predicate: QualifiedName {
+								namespace: Some("test".to_string()),
+								name: "reachable".to_string(),
+								span: 0..0,
+							},
+							object: Expr::String("true".to_string(), 0..0),
+							span: 0..0,
+						})],
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let mut engine = RuleEngine::new();
+			engine.run_derives(&mut model, &[derive]).unwrap();
+
+			// All nodes should now have reachable=true
+			let reachable_pred = model.resolve("test:reachable").unwrap();
+
+			let a_values = model.get_all(node_a, reachable_pred);
+			assert!(
+				a_values
+					.iter()
+					.any(|v| matches!(v, Value::Literal(s) if s == "true")),
+				"Node A should be reachable"
+			);
+
+			let b_values = model.get_all(node_b, reachable_pred);
+			assert!(
+				b_values
+					.iter()
+					.any(|v| matches!(v, Value::Literal(s) if s == "true")),
+				"Node B should be reachable (1st iteration)"
+			);
+
+			let c_values = model.get_all(node_c, reachable_pred);
+			assert!(
+				c_values
+					.iter()
+					.any(|v| matches!(v, Value::Literal(s) if s == "true")),
+				"Node C should be reachable (2nd iteration)"
+			);
+		}
+
+		#[test]
+		fn deferred_must_reevaluated_after_derives() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("core").unwrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
+
+			// Create a marker entity for validated status
+			let validated_marker = model.ensure_entity("test:ValidatedMarker").unwrap();
+
+			// Ensure predicate exists
+			model.ensure_entity("test:validated").unwrap();
+
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
+			// Note: item does NOT have validated yet
+
+			// Derive adds validated marker
+			let derive = Derive {
+				name: "add_validated".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Add(AddStmt {
+						subject: Expr::Var("x".to_string(), 0..0),
+						predicate: QualifiedName {
+							namespace: Some("test".to_string()),
+							name: "validated".to_string(),
+							span: 0..0,
+						},
+						object: Expr::QName(QualifiedName {
+							namespace: Some("test".to_string()),
+							name: "ValidatedMarker".to_string(),
+							span: 0..0,
+						}),
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			// Rule requires validated predicate - initially fails, but derive will fix it
+			let rule = Rule {
+				name: "require_validated".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Must,
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![
+									QueryStep {
+										axis: Axis::Child,
+										node_test: Some(QualifiedName {
+											namespace: None,
+											name: "x".to_string(),
+											span: 0..0,
+										}),
+										predicates: vec![],
+										span: 0..0,
+									},
+									QueryStep {
+										axis: Axis::Child,
+										node_test: Some(QualifiedName {
+											namespace: Some("test".to_string()),
+											name: "validated".to_string(),
+											span: 0..0,
+										}),
+										predicates: vec![],
+										span: 0..0,
+									},
+								],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let mut engine = RuleEngine::new();
+			engine
+				.run_with_modals(&mut model, &[derive], &[rule], &HashMap::new())
+				.unwrap();
+
+			// Item should have validated marker (from derive)
+			let validated_pred = model.resolve("test:validated").unwrap();
+			let values = model.get_all(item, validated_pred);
+			assert!(
+				values
+					.iter()
+					.any(|v| matches!(v, Value::Entity(e) if *e == validated_marker)),
+				"Derive should have added validated marker"
+			);
+
+			// Should NOT have any failures (deferred must re-evaluated after derive added validated)
+			// Note: core:AssertFailure may not exist if no failures were created (which is the success case)
+			let failures = if let Some(failure_type) = model.resolve("core:AssertFailure") {
+				(0..model.entity_count())
+					.filter(|i| {
+						let e = EntityId(*i as u32);
+						model.has_type(e, failure_type)
+					})
+					.count()
+			} else {
+				0 // No failure type means no failures
+			};
+
+			assert_eq!(
+				failures, 0,
+				"Deferred must should pass after derive adds validated predicate"
+			);
+		}
+	}
 }
