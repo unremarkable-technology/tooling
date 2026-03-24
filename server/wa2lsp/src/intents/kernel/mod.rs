@@ -15,7 +15,7 @@ use std::path::Path;
 use tower_lsp::lsp_types::Diagnostic;
 use url::Url;
 
-use crate::intents::kernel::ast::{Derive, Policy, PolicyBinding, QualifiedName, Rule};
+use crate::intents::kernel::ast::{Derive, Policy, QualifiedName, Rule};
 use crate::intents::kernel::loader::Loader;
 use crate::intents::model::{Model, NAMESPACE_TYPE};
 use crate::intents::vendor::{DocumentFormat, Method, Vendor, get_projector};
@@ -26,8 +26,10 @@ use lower::Lower;
 use parser::Resolver;
 use rules::RuleEngine;
 
+pub use ast::Modal;
 pub use loader::{LoadError, LoadedFile};
 pub use resolver::FileResolver;
+pub use rules::{OrderedBinding, PolicyExecutionResult, PolicyOutcome, RuleExecution};
 
 macro_rules! include_wa2 {
 	($file:literal) => {
@@ -46,18 +48,8 @@ const EMBEDDED_QUICKSTART: &str = include_wa2!("examples/quickstart.wa2");
 pub struct AnalysisResult {
 	pub model: Model,
 	pub failures: Vec<AssertFailure>,
-   pub outcome: PolicyOutcome,
-}
-
-/// Result of policy execution
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PolicyOutcome {
-	/// All must rules passed
-	Pass,
-	/// All must rules passed, but some should rules failed
-	Degraded,
-	/// At least one must rule failed (guard triggered)
-	Fail,
+	pub outcome: PolicyOutcome,
+	pub trace: Vec<RuleExecution>,
 }
 
 /// An assertion failure from rule execution
@@ -523,17 +515,7 @@ impl Kernel {
 	}
 
 	/// Build ordered policy bindings from selected profile
-	fn build_ordered_bindings(&self) -> Vec<PolicyBinding> {
-		let active_policy_names: HashSet<String> =
-			if let Some(ref profile_name) = self.selected_profile {
-				self.profiles
-					.get(profile_name)
-					.map(|policies| policies.iter().map(|p| p.to_string()).collect())
-					.unwrap_or_default()
-			} else {
-				HashSet::new()
-			};
-
+	fn build_ordered_bindings(&self) -> Vec<OrderedBinding> {
 		let mut seen_rules: HashSet<String> = HashSet::new();
 		let mut bindings = Vec::new();
 
@@ -546,8 +528,12 @@ impl Kernel {
 						for binding in &policy.bindings {
 							let rule_name = binding.rule_name.to_string();
 							if !seen_rules.contains(&rule_name) {
-								seen_rules.insert(rule_name);
-								bindings.push(binding.clone());
+								seen_rules.insert(rule_name.clone());
+								bindings.push(OrderedBinding {
+									policy_name: policy_name.clone(),
+									modal: binding.modal,
+									rule_name,
+								});
 							}
 							// If rule seen before, we already have it at stricter modal
 							// (first occurrence wins for position, but we could upgrade modal)
@@ -585,13 +571,18 @@ impl Kernel {
 			.collect();
 
 		let mut engine = RuleEngine::new();
-		let outcome = engine
+		let result = engine
 			.run_with_policy(&mut model, &derives, &rules_map, &bindings)
 			.map_err(|e| vec![Kernel::rule_error_to_diagnostic(&e)])?;
 
 		let failures = self.collect_failures(&model);
 
-		Ok(AnalysisResult { model, failures, outcome })
+		Ok(AnalysisResult {
+			model,
+			failures,
+			outcome: result.outcome,
+			trace: result.trace,
+		})
 	}
 
 	fn collect_failures(&self, model: &Model) -> Vec<AssertFailure> {

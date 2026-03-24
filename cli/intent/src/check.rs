@@ -13,7 +13,9 @@ use url::Url;
 
 use wa2lsp::iaac::cloudformation::cfn_ir::types::CfnTemplate;
 use wa2lsp::iaac::cloudformation::spec_cache::load_default_spec_store;
-use wa2lsp::intents::kernel::{AnalysisResult, AssertSeverity, Kernel, PolicyOutcome};
+use wa2lsp::intents::kernel::{
+	AnalysisResult, AssertFailure, AssertSeverity, Kernel, Modal, PolicyOutcome, RuleExecution,
+};
 use wa2lsp::intents::model::{EntityId, Model, Value};
 use wa2lsp::intents::vendor::{DocumentFormat, Method, Vendor};
 
@@ -23,6 +25,7 @@ enum Status {
 	Warn,
 	Fail,
 	Blocked,
+	Info,
 }
 
 impl From<AssertSeverity> for Status {
@@ -176,9 +179,10 @@ impl Reporter {
 	fn marker(&self, status: Status) -> String {
 		let s = match status {
 			Status::Pass => "✓",
-			Status::Warn => "!",
+			Status::Warn => "⚠",
 			Status::Fail => "✗",
 			Status::Blocked => "•",
+			Status::Info => "ℹ",
 		};
 
 		if !self.interactive {
@@ -190,6 +194,7 @@ impl Reporter {
 			Status::Warn => s.yellow().to_string(),
 			Status::Fail => s.red().to_string(),
 			Status::Blocked => s.dimmed().to_string(),
+			Status::Info => s.blue().to_string(),
 		}
 	}
 
@@ -292,6 +297,7 @@ pub async fn run(
 	entry: Option<&Path>,
 	graph: bool,
 	validate: bool,
+	verbose: bool,
 ) -> ExitCode {
 	let out = Reporter::new();
 	out.section("PREPARE");
@@ -423,43 +429,7 @@ pub async fn run(
 
 	out.section("RESULTS");
 
-	// Replace the exit_code block with:
-	let mut exit_code = match analysis.outcome {
-		PolicyOutcome::Pass => {
-			out.tree(
-				"",
-				true,
-				Status::Pass,
-				&format!("Profile: {profile}"),
-				Some("Target satisfies the selected intent profile."),
-			);
-			ExitCode::SUCCESS
-		}
-		PolicyOutcome::Degraded => {
-			out.tree(
-				"",
-				true,
-				Status::Warn,
-				&format!("Profile: {profile}"),
-				Some("Target satisfies the selected intent profile with warnings."),
-			);
-			let profile_prefix = Reporter::child_prefix("", true);
-			print_failures(&out, &profile_prefix, &analysis);
-			ExitCode::SUCCESS
-		}
-		PolicyOutcome::Fail => {
-			out.tree(
-				"",
-				true,
-				Status::Fail,
-				&format!("Profile: {profile}"),
-				Some("Target does not satisfy the selected intent profile."),
-			);
-			let profile_prefix = Reporter::child_prefix("", true);
-			print_failures(&out, &profile_prefix, &analysis);
-			ExitCode::FAILURE
-		}
-	};
+	let exit_code = print_results(&out, profile, &analysis, verbose);
 
 	if graph {
 		out.section("GRAPH");
@@ -479,7 +449,7 @@ pub async fn run(
 					report.detail.as_deref(),
 				);
 				if report.status == Status::Fail {
-					exit_code = ExitCode::FAILURE;
+					return ExitCode::FAILURE;
 				}
 			}
 			Err(e) => {
@@ -490,7 +460,7 @@ pub async fn run(
 					"Run CloudFormation validation",
 					Some(&e.to_string()),
 				);
-				exit_code = ExitCode::FAILURE;
+				return ExitCode::FAILURE;
 			}
 		}
 	}
@@ -498,16 +468,235 @@ pub async fn run(
 	exit_code
 }
 
-fn print_failures(out: &Reporter, prefix: &str, analysis: &AnalysisResult) {
-	for (idx, failure) in analysis.failures.iter().enumerate() {
-		let is_last = idx + 1 == analysis.failures.len();
+/// A policy with its rules grouped together
+struct PolicyGroup<'a> {
+	name: String,
+	rules: Vec<&'a RuleExecution>,
+}
 
-		let mut detail_parts = Vec::new();
+/// Group trace entries by policy, preserving order
+fn group_trace_by_policy(trace: &[RuleExecution]) -> Vec<PolicyGroup<'_>> {
+	let mut groups: Vec<PolicyGroup<'_>> = Vec::new();
+	let mut current_policy: Option<&str> = None;
 
-		if let Some(subject) = failure.subject {
-			let name = analysis.model.qualified_name(subject);
-			detail_parts.push(format!("Subject: {name}"));
+	for exec in trace {
+		let policy_name = if exec.policy_name.is_empty() {
+			"(no policy)"
+		} else {
+			&exec.policy_name
+		};
+
+		if current_policy != Some(policy_name) {
+			groups.push(PolicyGroup {
+				name: policy_name.to_string(),
+				rules: Vec::new(),
+			});
+			current_policy = Some(policy_name);
 		}
+
+		if let Some(group) = groups.last_mut() {
+			group.rules.push(exec);
+		}
+	}
+
+	groups
+}
+
+/// Find failures that belong to a specific rule
+fn find_failures_for_rule<'a>(
+	rule_name: &str,
+	failures: &'a [AssertFailure],
+) -> Vec<&'a AssertFailure> {
+	failures
+		.iter()
+		.filter(|f| f.assertion.starts_with(rule_name))
+		.collect()
+}
+
+/// Determine the status for a rule execution
+fn rule_status(exec: &RuleExecution) -> Status {
+	if exec.passed {
+		Status::Pass
+	} else {
+		match exec.modal {
+			Modal::Must => Status::Fail,
+			Modal::Should => Status::Warn,
+			Modal::May => Status::Info,
+		}
+	}
+}
+
+/// Determine if a policy has any failures (must failures = Fail, should failures = Warn)
+fn policy_status(rules: &[&RuleExecution]) -> Status {
+	let has_must_failure = rules.iter().any(|r| !r.passed && r.modal == Modal::Must);
+	let has_should_failure = rules.iter().any(|r| !r.passed && r.modal == Modal::Should);
+
+	if has_must_failure {
+		Status::Fail
+	} else if has_should_failure {
+		Status::Warn
+	} else {
+		Status::Pass
+	}
+}
+
+fn print_results(
+	out: &Reporter,
+	profile: &str,
+	analysis: &AnalysisResult,
+	verbose: bool,
+) -> ExitCode {
+	let policy_groups = group_trace_by_policy(&analysis.trace);
+
+	// Calculate profile-level counts
+	let total_policies = policy_groups.len();
+	let passed_policies = policy_groups
+		.iter()
+		.filter(|g| policy_status(&g.rules) == Status::Pass)
+		.count();
+
+	let (profile_status, exit_code) = match analysis.outcome {
+		PolicyOutcome::Pass => (Status::Pass, ExitCode::SUCCESS),
+		PolicyOutcome::Degraded => (Status::Warn, ExitCode::SUCCESS),
+		PolicyOutcome::Fail => (Status::Fail, ExitCode::FAILURE),
+	};
+
+	// Simple success case without verbose
+	if !verbose && analysis.failures.is_empty() {
+		out.tree(
+			"",
+			true,
+			profile_status,
+			&format!("Profile: {profile} [{passed_policies}/{total_policies}]"),
+			None,
+		);
+		return exit_code;
+	}
+
+	// Need to show the tree
+	// Filter to only policies/rules with failures if not verbose
+	let policies_to_show: Vec<&PolicyGroup<'_>> = if verbose {
+		policy_groups.iter().collect()
+	} else {
+		policy_groups
+			.iter()
+			.filter(|g| policy_status(&g.rules) != Status::Pass)
+			.collect()
+	};
+
+	let has_children = !policies_to_show.is_empty();
+
+	// Print profile header
+	out.tree(
+		"",
+		true,
+		profile_status,
+		&format!("Profile: {profile} [{passed_policies}/{total_policies}]"),
+		None,
+	);
+
+	if !has_children {
+		return exit_code;
+	}
+
+	let profile_prefix = Reporter::child_prefix("", true);
+
+	// Print each policy
+	let total_policies_shown = policies_to_show.len();
+	for (policy_idx, policy_group) in policies_to_show.iter().enumerate() {
+		let is_last_policy = policy_idx + 1 == total_policies_shown;
+
+		// Calculate rule counts for this policy
+		let total_rules = policy_group.rules.len();
+		let passed_rules = policy_group.rules.iter().filter(|r| r.passed).count();
+		let status = policy_status(&policy_group.rules);
+
+		out.tree(
+			&profile_prefix,
+			is_last_policy,
+			status,
+			&format!(
+				"Policy: {} [{}/{}]",
+				policy_group.name, passed_rules, total_rules
+			),
+			None,
+		);
+
+		let policy_prefix = Reporter::child_prefix(&profile_prefix, is_last_policy);
+
+		// Filter rules to show
+		let rules_to_show: Vec<&RuleExecution> = if verbose {
+			policy_group.rules.clone()
+		} else {
+			policy_group
+				.rules
+				.iter()
+				.filter(|r| !r.passed)
+				.copied()
+				.collect()
+		};
+
+		// Print each rule
+		let total_rules_shown = rules_to_show.len();
+		for (rule_idx, exec) in rules_to_show.iter().enumerate() {
+			let is_last_rule = rule_idx + 1 == total_rules_shown;
+			let status = rule_status(exec);
+
+			let modal_str = match exec.modal {
+				Modal::Must => "must",
+				Modal::Should => "should",
+				Modal::May => "may",
+			};
+
+			// Find failures for this rule
+			let rule_failures = find_failures_for_rule(&exec.rule_name, &analysis.failures);
+			let has_findings = !rule_failures.is_empty();
+
+			let label = if has_findings {
+				format!(
+					"{} {} ({} finding{})",
+					modal_str,
+					exec.rule_name,
+					rule_failures.len(),
+					if rule_failures.len() == 1 { "" } else { "s" }
+				)
+			} else {
+				format!("{} {}", modal_str, exec.rule_name)
+			};
+
+			out.tree(&policy_prefix, is_last_rule, status, &label, None);
+
+			// Print failures nested under this rule
+			if has_findings {
+				let rule_prefix = Reporter::child_prefix(&policy_prefix, is_last_rule);
+				print_failures_for_rule(out, &rule_prefix, &rule_failures, analysis);
+			}
+		}
+	}
+
+	exit_code
+}
+
+fn print_failures_for_rule(
+	out: &Reporter,
+	prefix: &str,
+	failures: &[&AssertFailure],
+	analysis: &AnalysisResult,
+) {
+	let total = failures.len();
+	for (idx, failure) in failures.iter().enumerate() {
+		let is_last = idx + 1 == total;
+		let status = Status::from(failure.severity);
+
+		// Build the label - use subject name if available
+		let label = if let Some(subject) = failure.subject {
+			analysis.model.qualified_name(subject)
+		} else {
+			"(unknown subject)".to_string()
+		};
+
+		// Build detail parts
+		let mut detail_parts = Vec::new();
 
 		if let Some(location) = analysis.resolve_failure_location(failure) {
 			let display_path = location
@@ -545,14 +734,7 @@ fn print_failures(out: &Reporter, prefix: &str, analysis: &AnalysisResult) {
 			Some(detail_parts.join("\n"))
 		};
 
-		let label = format!("{} ({})", failure.assertion, failure.severity.label());
-		out.tree(
-			prefix,
-			is_last,
-			Status::from(failure.severity),
-			&label,
-			detail.as_deref(),
-		);
+		out.tree(prefix, is_last, status, &label, detail.as_deref());
 	}
 }
 

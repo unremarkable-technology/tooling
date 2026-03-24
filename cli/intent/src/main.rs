@@ -1,9 +1,7 @@
 // main.rs
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
-
-use clap::{Parser, Subcommand};
-
 mod check;
 
 #[derive(Parser)]
@@ -57,6 +55,14 @@ enum Commands {
 			long_help = "Disable the separate CloudFormation validation stage.\n\nBy default validation runs concurrently and is reported after results."
 		)]
 		novalidation: bool,
+
+		#[arg(
+			long,
+			short = 'v',
+			help = "Show execution trace",
+			long_help = "Show the execution trace of rules grouped by policy.\n\nDisplays which rules passed or failed and their modal (must/should/may)."
+		)]
+		verbose: bool,
 	},
 }
 
@@ -71,6 +77,17 @@ async fn main() -> ExitCode {
 			entry,
 			graph,
 			novalidation,
-		} => check::run(&profile, &target, entry.as_deref(), graph, !novalidation).await,
+			verbose,
+		} => {
+			check::run(
+				&profile,
+				&target,
+				entry.as_deref(),
+				graph,
+				!novalidation,
+				verbose,
+			)
+			.await
+		}
 	}
 }
