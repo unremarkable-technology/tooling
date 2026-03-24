@@ -15,7 +15,7 @@ use std::path::Path;
 use tower_lsp::lsp_types::Diagnostic;
 use url::Url;
 
-use crate::intents::kernel::ast::{Derive, Modal, Policy, QualifiedName, Rule};
+use crate::intents::kernel::ast::{Derive, Policy, PolicyBinding, QualifiedName, Rule};
 use crate::intents::kernel::loader::Loader;
 use crate::intents::model::{Model, NAMESPACE_TYPE};
 use crate::intents::vendor::{DocumentFormat, Method, Vendor, get_projector};
@@ -46,6 +46,18 @@ const EMBEDDED_QUICKSTART: &str = include_wa2!("examples/quickstart.wa2");
 pub struct AnalysisResult {
 	pub model: Model,
 	pub failures: Vec<AssertFailure>,
+   pub outcome: PolicyOutcome,
+}
+
+/// Result of policy execution
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyOutcome {
+	/// All must rules passed
+	Pass,
+	/// All must rules passed, but some should rules failed
+	Degraded,
+	/// At least one must rule failed (guard triggered)
+	Fail,
 }
 
 /// An assertion failure from rule execution
@@ -133,7 +145,10 @@ impl AnalysisResult {
 			})
 			.or_else(|| self.model.get_uri(failure.entity))?;
 
-		Some(FailureLocation { uri: uri.clone(), range })
+		Some(FailureLocation {
+			uri: uri.clone(),
+			range,
+		})
 	}
 }
 
@@ -507,11 +522,8 @@ impl Kernel {
 		Ok(())
 	}
 
-	/// Build a map from rule name to its modal (from selected profile's policies only)
-	fn build_rule_modals(&self) -> HashMap<String, Modal> {
-		let mut modals = HashMap::new();
-
-		// Get policies from selected profile only
+	/// Build ordered policy bindings from selected profile
+	fn build_ordered_bindings(&self) -> Vec<PolicyBinding> {
 		let active_policy_names: HashSet<String> =
 			if let Some(ref profile_name) = self.selected_profile {
 				self.profiles
@@ -519,40 +531,33 @@ impl Kernel {
 					.map(|policies| policies.iter().map(|p| p.to_string()).collect())
 					.unwrap_or_default()
 			} else {
-				// No profile selected - no policies active
 				HashSet::new()
 			};
-		// TODO: make into logging
-		//eprintln!("active_policy_names: {active_policy_names:?}");
 
-		for policy in &self.policies {
-			// Skip policies not in the selected profile
-			if !active_policy_names.contains(&policy.name) {
-				continue;
-			}
-			// TODO: make into logging
-			//eprintln!("\trunning policy {}", policy.name);
+		let mut seen_rules: HashSet<String> = HashSet::new();
+		let mut bindings = Vec::new();
 
-			for binding in &policy.bindings {
-				let rule_name = binding.rule_name.to_string();
-				let new_modal = binding.modal;
-				modals
-					.entry(rule_name)
-					.and_modify(|existing| {
-						*existing = Self::stricter_modal(*existing, new_modal);
-					})
-					.or_insert(new_modal);
+		// Iterate policies in profile order
+		if let Some(ref profile_name) = self.selected_profile {
+			if let Some(policy_refs) = self.profiles.get(profile_name) {
+				for policy_ref in policy_refs {
+					let policy_name = policy_ref.to_string();
+					if let Some(policy) = self.policies.iter().find(|p| p.name == policy_name) {
+						for binding in &policy.bindings {
+							let rule_name = binding.rule_name.to_string();
+							if !seen_rules.contains(&rule_name) {
+								seen_rules.insert(rule_name);
+								bindings.push(binding.clone());
+							}
+							// If rule seen before, we already have it at stricter modal
+							// (first occurrence wins for position, but we could upgrade modal)
+						}
+					}
+				}
 			}
 		}
-		modals
-	}
 
-	fn stricter_modal(a: Modal, b: Modal) -> Modal {
-		match (a, b) {
-			(Modal::Must, _) | (_, Modal::Must) => Modal::Must,
-			(Modal::Should, _) | (_, Modal::Should) => Modal::Should,
-			_ => Modal::May,
-		}
+		bindings
 	}
 
 	pub fn analyse(
@@ -569,26 +574,24 @@ impl Kernel {
 		let projector = get_projector(vendor, method);
 		projector.project_into(&mut model, text, uri, format)?;
 
-		// Build rule→modal map from selected profile's policies
-		let rule_modals = self.build_rule_modals();
+		// Build ordered bindings from selected profile
+		let bindings = self.build_ordered_bindings();
 
-		// Only run rules that are in the selected profile
-		let active_rules: Vec<Rule> = self
+		// Build rules lookup map
+		let rules_map: HashMap<String, Rule> = self
 			.rules
 			.iter()
-			.filter(|r| rule_modals.contains_key(&r.name))
-			.cloned()
+			.map(|r| (r.name.clone(), r.clone()))
 			.collect();
 
 		let mut engine = RuleEngine::new();
-		engine
-			.run_with_modals(&mut model, &derives, &active_rules, &rule_modals)
+		let outcome = engine
+			.run_with_policy(&mut model, &derives, &rules_map, &bindings)
 			.map_err(|e| vec![Kernel::rule_error_to_diagnostic(&e)])?;
 
-		//eprintln!("model: {}", print_model_as_tree(&model));
 		let failures = self.collect_failures(&model);
 
-		Ok(AnalysisResult { model, failures })
+		Ok(AnalysisResult { model, failures, outcome })
 	}
 
 	fn collect_failures(&self, model: &Model) -> Vec<AssertFailure> {

@@ -305,16 +305,7 @@ pub struct AddExpr {
 #[derive(Debug, Clone)]
 pub struct MatchExpr {
 	pub value: Expr,
-	pub as_type: Option<AsExpr>,
 	pub arms: Vec<MatchArm>,
-	pub span: Span,
-}
-
-/// As expression for type coercion: as(Type, strict)
-#[derive(Debug, Clone)]
-pub struct AsExpr {
-	pub target_type: QualifiedName,
-	pub mode: Modal,
 	pub span: Span,
 }
 

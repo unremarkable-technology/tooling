@@ -1,10 +1,12 @@
-//! Rule execution engine with fixed-point iteration
+//! Rule execution engine with two-phase execution:
+//! Phase 1: Derives run to fixed-point (model building)
+//! Phase 2: Rules run in policy order (validation only, no model changes)
 
 use std::collections::{HashMap, HashSet};
 
-use crate::intents::kernel::ast::*;
+use crate::intents::kernel::{PolicyOutcome, ast::*};
 use crate::intents::kernel::query::QueryEngine;
-use crate::intents::model::{EntityId, Model};
+use crate::intents::model::{EntityId, Model, Value};
 
 #[derive(Debug)]
 pub struct RuleError {
@@ -21,22 +23,10 @@ enum StmtResult {
 /// Reference binding: map of loop variable names to entity values
 type ReferenceBinding = Vec<(String, EntityId)>;
 
-struct DeferredMust {
-	rule_name: String,
-	expr: Expr,
-	env: Env,
-	subject: Option<EntityId>,
-	area: Option<EntityId>,
-	message: Option<String>,
-	modal: Modal,
-}
-
 pub struct RuleEngine {
 	max_iterations: usize,
 	/// Tracks (rule_name, reference_binding) combinations already processed
 	processed: HashSet<(String, ReferenceBinding)>,
-	current_modal: Option<Modal>,
-	deferred_musts: Vec<DeferredMust>,
 }
 
 impl Default for RuleEngine {
@@ -50,15 +40,30 @@ impl RuleEngine {
 		Self {
 			max_iterations: 100,
 			processed: HashSet::new(),
-			current_modal: None,
-			deferred_musts: Vec::new(),
 		}
 	}
 
+	/// Simple run for tests - no policy ordering
 	pub fn run(&mut self, model: &mut Model, rules: &[Rule]) -> Result<(), RuleError> {
-		self.run_with_modals(model, &[], rules, &HashMap::new())
+		let rules_map: HashMap<String, Rule> =
+			rules.iter().map(|r| (r.name.clone(), r.clone())).collect();
+		let bindings: Vec<PolicyBinding> = rules
+			.iter()
+			.map(|r| PolicyBinding {
+				modal: Modal::Must,
+				rule_name: QualifiedName {
+					namespace: None,
+					name: r.name.clone(),
+					span: 0..0,
+				},
+				span: 0..0,
+			})
+			.collect();
+		self.run_with_policy(model, &[], &rules_map, &bindings)?;
+		Ok(())
 	}
 
+	/// Run with derives but no policy (for backwards compatibility)
 	pub fn run_with_modals(
 		&mut self,
 		model: &mut Model,
@@ -66,65 +71,115 @@ impl RuleEngine {
 		rules: &[Rule],
 		rule_modals: &HashMap<String, Modal>,
 	) -> Result<(), RuleError> {
-		self.processed.clear();
-		self.deferred_musts.clear();
+		let rules_map: HashMap<String, Rule> =
+			rules.iter().map(|r| (r.name.clone(), r.clone())).collect();
 
+		// Build bindings from rule_modals (arbitrary order for backwards compat)
+		let bindings: Vec<PolicyBinding> = rules
+			.iter()
+			.filter_map(|r| {
+				rule_modals.get(&r.name).map(|&modal| PolicyBinding {
+					modal,
+					rule_name: QualifiedName {
+						namespace: None,
+						name: r.name.clone(),
+						span: 0..0,
+					},
+					span: 0..0,
+				})
+			})
+			.collect();
+
+		self.run_with_policy(model, derives, &rules_map, &bindings)?;
+		Ok(())
+	}
+
+	/// Main entry point: two-phase execution with policy ordering
+	pub fn run_with_policy(
+		&mut self,
+		model: &mut Model,
+		derives: &[Derive],
+		rules: &HashMap<String, Rule>,
+		bindings: &[PolicyBinding],
+	) -> Result<PolicyOutcome, RuleError> {
 		// Phase 1: Run derives to fixed-point (model building)
 		self.run_derives(model, derives)?;
 
-		// Phase 2: Run rules to fixed-point, defer must failures
-		self.processed.clear(); // Reset for rules phase
-		for _ in 0..self.max_iterations {
-			let initial_count = model.statement_count();
+		// Phase 2: Run rules in policy order (validation only)
+		self.processed.clear();
+		let mut policy_outcome = PolicyOutcome::Pass;
 
-			for rule in rules {
-				// TODO: make into logging
-				//eprintln!("\trunning rule {}", rule.name);
-				self.current_modal = rule_modals.get(&rule.name).copied();
-				self.execute_rule(model, rule)?;
-			}
+		for binding in bindings {
+			let rule_name = binding.rule_name.to_string();
+			let rule = match rules.get(&rule_name) {
+				Some(r) => r,
+				None => {
+					// Rule not in rules map - skip (might not be loaded)
+					continue;
+				}
+			};
 
-			let final_count = model.statement_count();
-			if final_count == initial_count {
-				break;
+			let errors_before = self.count_error_findings(model);
+			self.execute_rule(model, rule)?;
+			let errors_after = self.count_error_findings(model);
+
+			let rule_failed = errors_after > errors_before;
+
+			match (binding.modal, rule_failed) {
+				(Modal::Must, true) => {
+					// Guard: stop policy execution
+					return Ok(PolicyOutcome::Fail);
+				}
+				(Modal::Should, true) => {
+					// Note degraded, continue
+					policy_outcome = PolicyOutcome::Degraded;
+				}
+				(Modal::May, _) | (_, false) => {
+					// Continue
+				}
 			}
 		}
 
-		// Phase 3: Re-evaluate deferred musts and create failures
-		for deferred in std::mem::take(&mut self.deferred_musts) {
-			// TODO: make into logging
-			//eprintln!("\trunning rule (final) {}", deferred.rule_name);
-			let result = self.eval_expr(model, &deferred.expr, &deferred.env)?;
-			if !self.is_satisfied(&result) {
-				self.create_rich_failure(
-					model,
-					&deferred.rule_name,
-					deferred.subject,
-					deferred.area,
-					deferred.message,
-					deferred.modal,
-				)?;
-			}
-		}
+		Ok(policy_outcome)
+	}
 
-		Ok(())
+	/// Count Error-severity findings in model
+	fn count_error_findings(&self, model: &Model) -> usize {
+		let failure_type = match model.resolve("core:AssertFailure") {
+			Some(t) => t,
+			None => return 0,
+		};
+		let severity_pred = match model.resolve("core:severity") {
+			Some(p) => p,
+			None => return 0,
+		};
+		let error_severity = match model.resolve("core:Error") {
+			Some(e) => e,
+			None => return 0,
+		};
+
+		(0..model.entity_count())
+			.filter(|i| {
+				let e = EntityId(*i as u32);
+				if !model.has_type(e, failure_type) {
+					return false;
+				}
+				model
+					.get_all(e, severity_pred)
+					.iter()
+					.any(|v| matches!(v, Value::Entity(sev) if *sev == error_severity))
+			})
+			.count()
 	}
 
 	/// Run derives to fixed-point (model building phase)
 	pub fn run_derives(&mut self, model: &mut Model, derives: &[Derive]) -> Result<(), RuleError> {
 		self.processed.clear();
 
-		for derive in derives {
-			// TODO: make into logging
-			//eprintln!("\trunning derive {}", derive.name);
-		}
-
 		for _ in 0..self.max_iterations {
 			let initial_count = model.statement_count();
 
 			for derive in derives {
-				// Derives use should as default modal (not must)
-				self.current_modal = Some(Modal::Should);
 				self.execute_derive(model, derive)?;
 			}
 
@@ -140,13 +195,13 @@ impl RuleEngine {
 	fn execute_derive(&mut self, model: &mut Model, derive: &Derive) -> Result<(), RuleError> {
 		let mut env = Env::new();
 		let binding = Vec::new();
-		self.execute_statements(model, &derive.body, &mut env, &derive.name, &binding)
+		self.execute_statements(model, &derive.body, &mut env, &derive.name, &binding, true)
 	}
 
 	fn execute_rule(&mut self, model: &mut Model, rule: &Rule) -> Result<(), RuleError> {
 		let mut env = Env::new();
 		let binding = Vec::new();
-		self.execute_statements(model, &rule.body, &mut env, &rule.name, &binding)
+		self.execute_statements(model, &rule.body, &mut env, &rule.name, &binding, false)
 	}
 
 	fn execute_statements(
@@ -156,9 +211,17 @@ impl RuleEngine {
 		env: &mut Env,
 		rule_name: &str,
 		reference_binding: &ReferenceBinding,
+		is_derive: bool,
 	) -> Result<(), RuleError> {
 		for stmt in stmts {
-			match self.execute_statement(model, stmt, env, rule_name, reference_binding)? {
+			match self.execute_statement(
+				model,
+				stmt,
+				env,
+				rule_name,
+				reference_binding,
+				is_derive,
+			)? {
 				StmtResult::Continue => {}
 				StmtResult::Guard => return Ok(()), // Stop processing this body
 			}
@@ -173,18 +236,24 @@ impl RuleEngine {
 		env: &mut Env,
 		rule_name: &str,
 		reference_binding: &ReferenceBinding,
+		is_derive: bool,
 	) -> Result<StmtResult, RuleError> {
 		match stmt {
 			Statement::Let(let_stmt) => {
-				let value = self.eval_expr(model, &let_stmt.value, env)?;
+				let value = self.eval_expr(model, &let_stmt.value, env, is_derive)?;
 				env.bind(let_stmt.name.clone(), value);
 				Ok(StmtResult::Continue)
 			}
 
 			Statement::Add(add_stmt) => {
-				let subject = self.eval_expr_to_entity(model, &add_stmt.subject, env)?;
+				if !is_derive {
+					return Err(RuleError {
+						message: "add statements not allowed in rules".to_string(),
+					});
+				}
+				let subject = self.eval_expr_to_entity(model, &add_stmt.subject, env, is_derive)?;
 				let pred_name = add_stmt.predicate.to_string();
-				let object = self.eval_expr(model, &add_stmt.object, env)?;
+				let object = self.eval_expr(model, &add_stmt.object, env, is_derive)?;
 
 				match object {
 					EvalResult::Entity(obj_id) => {
@@ -216,7 +285,7 @@ impl RuleEngine {
 			}
 
 			Statement::For(for_stmt) => {
-				let collection = self.eval_expr(model, &for_stmt.collection, env)?;
+				let collection = self.eval_expr(model, &for_stmt.collection, env, is_derive)?;
 				let entities = match collection {
 					EvalResult::Set(ids) => ids,
 					EvalResult::Entity(id) => vec![id],
@@ -241,13 +310,14 @@ impl RuleEngine {
 						&mut inner_env,
 						rule_name,
 						&new_binding,
+						is_derive,
 					)?;
 				}
 				Ok(StmtResult::Continue)
 			}
 
 			Statement::If(if_stmt) => {
-				let cond = self.eval_expr(model, &if_stmt.condition, env)?;
+				let cond = self.eval_expr(model, &if_stmt.condition, env, is_derive)?;
 				if self.is_satisfied(&cond) {
 					self.execute_statements(
 						model,
@@ -255,28 +325,36 @@ impl RuleEngine {
 						env,
 						rule_name,
 						reference_binding,
+						is_derive,
 					)?;
 				} else if let Some(ref else_body) = if_stmt.else_body {
-					self.execute_statements(model, else_body, env, rule_name, reference_binding)?;
+					self.execute_statements(
+						model,
+						else_body,
+						env,
+						rule_name,
+						reference_binding,
+						is_derive,
+					)?;
 				}
 				Ok(StmtResult::Continue)
 			}
 
 			Statement::Assert(assert_stmt) => {
-				let result = self.eval_expr(model, &assert_stmt.expr, env)?;
+				let result = self.eval_expr(model, &assert_stmt.expr, env, is_derive)?;
 				if !self.is_satisfied(&result) {
 					self.create_failure(model, rule_name, "assertion failed")?;
 				}
 				Ok(StmtResult::Continue)
 			}
 
-			Statement::Modal(must_stmt) => {
-				let result = self.eval_expr(model, &must_stmt.expr, env)?;
+			Statement::Modal(modal_stmt) => {
+				let result = self.eval_expr(model, &modal_stmt.expr, env, is_derive)?;
 				if !self.is_satisfied(&result) {
-					// Evaluate subject/area now, defer failure creation
-					let subject = if let Some(ref meta) = must_stmt.metadata {
+					// Evaluate subject/area and create finding immediately
+					let subject = if let Some(ref meta) = modal_stmt.metadata {
 						if let Some(ref subj_expr) = meta.subject {
-							Some(self.eval_expr_to_entity(model, subj_expr, env)?)
+							Some(self.eval_expr_to_entity(model, subj_expr, env, is_derive)?)
 						} else {
 							self.get_context_entity(env)
 						}
@@ -284,7 +362,7 @@ impl RuleEngine {
 						self.get_context_entity(env)
 					};
 
-					let area = if let Some(ref meta) = must_stmt.metadata {
+					let area = if let Some(ref meta) = modal_stmt.metadata {
 						if let Some(ref area_name) = meta.area {
 							model.resolve(&area_name.to_string())
 						} else {
@@ -294,19 +372,11 @@ impl RuleEngine {
 						None
 					};
 
-					let message = must_stmt.metadata.as_ref().and_then(|m| m.message.clone());
-					// Use modal from statement, fall back to current_modal (from policy), then Must
-					let modal = must_stmt.modal;
+					let message = modal_stmt.metadata.as_ref().and_then(|m| m.message.clone());
+					let modal = modal_stmt.modal;
 
-					self.deferred_musts.push(DeferredMust {
-						rule_name: rule_name.to_string(),
-						expr: must_stmt.expr.clone(),
-						env: env.clone(),
-						subject,
-						area,
-						message,
-						modal,
-					});
+					// Create finding immediately
+					self.create_rich_failure(model, rule_name, subject, area, message, modal)?;
 
 					// Guard behavior depends on modal:
 					// - must/should: skip rest of body
@@ -461,15 +531,23 @@ impl RuleEngine {
 		model: &mut Model,
 		expr: &Expr,
 		env: &Env,
+		is_derive: bool,
 	) -> Result<EvalResult, RuleError> {
 		match expr {
 			Expr::Var(name, _) => env.get(name).cloned().ok_or_else(|| RuleError {
 				message: format!("undefined variable: {}", name),
 			}),
 
-			Expr::Blank(_) => Err(RuleError {
-				message: "blank node in eval context - should be handled in add".to_string(),
-			}),
+			Expr::Blank(_) => {
+				if !is_derive {
+					return Err(RuleError {
+						message: "blank nodes not allowed in rules".to_string(),
+					});
+				}
+				Err(RuleError {
+					message: "blank node in eval context - should be handled in add".to_string(),
+				})
+			}
 
 			Expr::Query(query) => {
 				let engine = QueryEngine::new();
@@ -528,9 +606,14 @@ impl RuleEngine {
 			}
 
 			Expr::Add(add_expr) => {
-				let subject = self.eval_expr_to_entity(model, &add_expr.subject, env)?;
+				if !is_derive {
+					return Err(RuleError {
+						message: "add expressions not allowed in rules".to_string(),
+					});
+				}
+				let subject = self.eval_expr_to_entity(model, &add_expr.subject, env, is_derive)?;
 				let pred_name = add_expr.predicate.to_string();
-				let object = self.eval_expr(model, &add_expr.object, env)?;
+				let object = self.eval_expr(model, &add_expr.object, env, is_derive)?;
 
 				match object {
 					EvalResult::Entity(obj_id) => {
@@ -578,7 +661,7 @@ impl RuleEngine {
 			Expr::Bool(b, _) => Ok(EvalResult::Literal(b.to_string())),
 
 			Expr::Empty(inner, _) => {
-				let value = self.eval_expr(model, inner, env)?;
+				let value = self.eval_expr(model, inner, env, is_derive)?;
 				Ok(if !self.is_satisfied(&value) {
 					EvalResult::Literal("true".to_string())
 				} else {
@@ -656,7 +739,7 @@ impl RuleEngine {
 					}
 				} else {
 					// Not a query - evaluate normally
-					let value = self.eval_expr(model, &match_expr.value, env)?;
+					let value = self.eval_expr(model, &match_expr.value, env, is_derive)?;
 					match value {
 						EvalResult::Literal(s) => s,
 						EvalResult::Empty => return Ok(EvalResult::Literal("false".to_string())),
@@ -678,83 +761,6 @@ impl RuleEngine {
 					value_str
 				};
 
-				// Check as_type conversion if specified
-				if let Some(ref as_expr) = match_expr.as_type {
-					let type_name = as_expr.target_type.to_string();
-					if let Some(type_entity) = model.resolve(&type_name) {
-						// Get all variants of this enum (entities with wa2:subTypeOf -> this enum)
-						let mut valid_variants = Vec::new();
-						if let Some(sub_type_of) = model.resolve("wa2:subTypeOf") {
-							for i in 0..model.entity_count() {
-								let entity = EntityId(i as u32);
-								if model.has(
-									entity,
-									sub_type_of,
-									&crate::intents::model::Value::Entity(type_entity),
-								) {
-									let name = model.qualified_name(entity);
-									let local = name.rsplit(':').next().unwrap_or(&name);
-									valid_variants.push(local.to_string());
-								}
-							}
-						}
-
-						// Check if value matches a variant
-						let is_valid = valid_variants.iter().any(|v| v == &value_str);
-
-						if !is_valid && as_expr.mode != Modal::May {
-							// Get subject from first variable in match query
-							let subject = if let Expr::Query(ref query) = match_expr.value {
-								if let Some(first_step) = query.path.steps.first() {
-									if let Some(ref node_test) = first_step.node_test {
-										if node_test.namespace.is_none() {
-											if let Some(result) = env.get(&node_test.name) {
-												match result {
-													EvalResult::Entity(id) => Some(*id),
-													EvalResult::Set(ids) if !ids.is_empty() => {
-														Some(ids[0])
-													}
-													_ => None,
-												}
-											} else {
-												None
-											}
-										} else {
-											None
-										}
-									} else {
-										None
-									}
-								} else {
-									None
-								}
-							} else {
-								None
-							};
-
-							// Create failure with appropriate severity
-							let message =
-								format!("Value '{}' is not a valid {}", value_str, type_name);
-							self.create_rich_failure(
-								model,
-								"as_conversion",
-								subject,
-								Some(type_entity),
-								Some(message),
-								as_expr.mode,
-							)?;
-
-							// Guard: return Empty for must/should
-							return Ok(EvalResult::Empty);
-						}
-					} else {
-						// Type not found - always an error (framework bug, not data validation)
-						return Err(RuleError {
-							message: format!("type '{}' not found for as() conversion", type_name),
-						});
-					}
-				}
-
 				// Find matching arm
 				for arm in &match_expr.arms {
 					let matches = arm.patterns.iter().any(|pattern| match pattern {
@@ -763,7 +769,7 @@ impl RuleEngine {
 					});
 
 					if matches {
-						return self.eval_expr(model, &arm.result, env);
+						return self.eval_expr(model, &arm.result, env, is_derive);
 					}
 				}
 
@@ -839,7 +845,7 @@ impl RuleEngine {
 					}
 				} else {
 					// Not a query - evaluate normally
-					let value = self.eval_expr(model, &validation.inner, env)?;
+					let value = self.eval_expr(model, &validation.inner, env, is_derive)?;
 					match value {
 						EvalResult::Literal(s) => s,
 						EvalResult::Empty => return Ok(EvalResult::Empty),
@@ -900,6 +906,7 @@ impl RuleEngine {
 		model: &mut Model,
 		expr: &Expr,
 		env: &Env,
+		is_derive: bool,
 	) -> Result<EntityId, RuleError> {
 		match expr {
 			Expr::Var(name, _) => match env.get(name) {
@@ -920,6 +927,11 @@ impl RuleEngine {
 				}),
 			},
 			Expr::Blank(_) => {
+				if !is_derive {
+					return Err(RuleError {
+						message: "blank nodes not allowed in rules".to_string(),
+					});
+				}
 				let id = model.blank();
 				Ok(id)
 			}
@@ -943,9 +955,14 @@ impl RuleEngine {
 				})
 			}
 			Expr::Add(add_expr) => {
-				let subject = self.eval_expr_to_entity(model, &add_expr.subject, env)?;
+				if !is_derive {
+					return Err(RuleError {
+						message: "add expressions not allowed in rules".to_string(),
+					});
+				}
+				let subject = self.eval_expr_to_entity(model, &add_expr.subject, env, is_derive)?;
 				let pred_name = add_expr.predicate.to_string();
-				let object = self.eval_expr(model, &add_expr.object, env)?;
+				let object = self.eval_expr(model, &add_expr.object, env, is_derive)?;
 
 				match object {
 					EvalResult::Entity(obj_id) => {
@@ -982,14 +999,6 @@ impl RuleEngine {
 			_ => Err(RuleError {
 				message: format!("expression cannot be converted to entity: {:?}", expr),
 			}),
-		}
-	}
-
-	fn modal_to_severity(modal: Modal) -> &'static str {
-		match modal {
-			Modal::Must => "error",
-			Modal::Should => "warning",
-			Modal::May => "info",
 		}
 	}
 }
@@ -1171,7 +1180,7 @@ mod tests {
 			});
 
 			let expr = Expr::Empty(Box::new(inner), 0..0);
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			let result = engine.eval_expr(&mut model, &expr, &env, false).unwrap();
 
 			assert!(
 				matches!(result, EvalResult::Literal(s) if s == "true"),
@@ -1211,7 +1220,7 @@ mod tests {
 			});
 
 			let expr = Expr::Empty(Box::new(inner), 0..0);
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			let result = engine.eval_expr(&mut model, &expr, &env, false).unwrap();
 
 			assert!(
 				matches!(result, EvalResult::Empty),
@@ -1226,7 +1235,7 @@ mod tests {
 			let env = Env::new();
 
 			let expr = Expr::Empty(Box::new(Expr::String("".to_string(), 0..0)), 0..0);
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			let result = engine.eval_expr(&mut model, &expr, &env, false).unwrap();
 
 			assert!(
 				matches!(result, EvalResult::Literal(s) if s == "true"),
@@ -1241,7 +1250,7 @@ mod tests {
 			let env = Env::new();
 
 			let expr = Expr::Empty(Box::new(Expr::String("hello".to_string(), 0..0)), 0..0);
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			let result = engine.eval_expr(&mut model, &expr, &env, false).unwrap();
 
 			assert!(
 				matches!(result, EvalResult::Empty),
@@ -1256,7 +1265,7 @@ mod tests {
 			let env = Env::new();
 
 			let expr = Expr::Empty(Box::new(Expr::Bool(false, 0..0)), 0..0);
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			let result = engine.eval_expr(&mut model, &expr, &env, false).unwrap();
 
 			assert!(
 				matches!(result, EvalResult::Literal(s) if s == "true"),
@@ -1274,7 +1283,7 @@ mod tests {
 			env.bind("x".to_string(), EvalResult::Entity(entity));
 
 			let expr = Expr::Empty(Box::new(Expr::Var("x".to_string(), 0..0)), 0..0);
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			let result = engine.eval_expr(&mut model, &expr, &env, false).unwrap();
 
 			assert!(
 				matches!(result, EvalResult::Empty),
@@ -1296,11 +1305,12 @@ mod tests {
 			let marker_type = model.ensure_entity("test:Marker").unwrap();
 			model.apply_to(marker_type, "wa2:type", "wa2:Type").unwrap();
 
-			let rule = Rule {
-				name: "test_rule".to_string(),
+			// Use derive instead of rule since we have add statement
+			let derive = Derive {
+				name: "test_derive".to_string(),
 				body: vec![
 					Statement::Modal(ModalStmt {
-						modal: Modal::Must,
+						modal: Modal::Should, // derives don't allow must
 						expr: Expr::Query(QueryExpr {
 							path: QueryPath {
 								steps: vec![QueryStep {
@@ -1339,7 +1349,7 @@ mod tests {
 			};
 
 			let mut engine = RuleEngine::new();
-			engine.run(&mut model, &[rule]).unwrap();
+			engine.run_derives(&mut model, &[derive]).unwrap();
 
 			let markers: Vec<_> = (0..model.entity_count())
 				.filter(|i| {
@@ -1350,7 +1360,7 @@ mod tests {
 
 			assert!(
 				markers.is_empty(),
-				"must guard should prevent subsequent statements from running"
+				"should guard should prevent subsequent statements from running"
 			);
 		}
 
@@ -1363,8 +1373,8 @@ mod tests {
 			let marker_type = model.ensure_entity("test:Marker").unwrap();
 			model.apply_to(marker_type, "wa2:type", "wa2:Type").unwrap();
 
-			let rule = Rule {
-				name: "test_rule".to_string(),
+			let derive = Derive {
+				name: "test_derive".to_string(),
 				body: vec![
 					Statement::Modal(ModalStmt {
 						modal: Modal::Should,
@@ -1406,7 +1416,7 @@ mod tests {
 			};
 
 			let mut engine = RuleEngine::new();
-			engine.run(&mut model, &[rule]).unwrap();
+			engine.run_derives(&mut model, &[derive]).unwrap();
 
 			let markers: Vec<_> = (0..model.entity_count())
 				.filter(|i| {
@@ -1440,8 +1450,8 @@ mod tests {
 				.apply_entity(trigger, "wa2:type", trigger_type)
 				.unwrap();
 
-			let rule = Rule {
-				name: "test_rule".to_string(),
+			let derive = Derive {
+				name: "test_derive".to_string(),
 				body: vec![Statement::For(ForStmt {
 					var: "t".to_string(),
 					collection: Expr::Query(QueryExpr {
@@ -1503,7 +1513,7 @@ mod tests {
 			};
 
 			let mut engine = RuleEngine::new();
-			engine.run(&mut model, &[rule]).unwrap();
+			engine.run_derives(&mut model, &[derive]).unwrap();
 
 			let markers: Vec<_> = (0..model.entity_count())
 				.filter(|i| {
@@ -1562,8 +1572,8 @@ mod tests {
 				.unwrap();
 			model.apply_entity(item3, "test:hasField", field3).unwrap();
 
-			let rule = Rule {
-				name: "test_rule".to_string(),
+			let derive = Derive {
+				name: "test_derive".to_string(),
 				body: vec![Statement::For(ForStmt {
 					var: "item".to_string(),
 					collection: Expr::Query(QueryExpr {
@@ -1637,7 +1647,7 @@ mod tests {
 			};
 
 			let mut engine = RuleEngine::new();
-			engine.run(&mut model, &[rule]).unwrap();
+			engine.run_derives(&mut model, &[derive]).unwrap();
 
 			let marked_as_pred = model.resolve("test:markedAs").unwrap();
 			let processed: Vec<_> = (0..model.entity_count())
@@ -1694,7 +1704,8 @@ mod tests {
 				span: 0..0,
 			}));
 
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			// Use is_derive=true since add is only allowed in derives
+			let result = engine.eval_expr(&mut model, &expr, &env, true).unwrap();
 
 			assert!(
 				model.entity_count() > initial_count,
@@ -1732,7 +1743,7 @@ mod tests {
 				span: 0..0,
 			}));
 
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			let result = engine.eval_expr(&mut model, &expr, &env, true).unwrap();
 
 			if let EvalResult::Entity(id) = result {
 				assert!(
@@ -1777,7 +1788,7 @@ mod tests {
 				span: 0..0,
 			}));
 
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			let result = engine.eval_expr(&mut model, &expr, &env, true).unwrap();
 
 			if let EvalResult::Entity(id) = result {
 				assert_eq!(id, item, "Add should return the subject entity");
@@ -1816,7 +1827,7 @@ mod tests {
 				span: 0..0,
 			}));
 
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			let result = engine.eval_expr(&mut model, &expr, &env, true).unwrap();
 
 			assert!(matches!(result, EvalResult::Entity(id) if id == item));
 
@@ -1862,7 +1873,7 @@ mod tests {
 				span: 0..0,
 			}));
 
-			let result = engine.eval_expr(&mut model, &expr, &env).unwrap();
+			let result = engine.eval_expr(&mut model, &expr, &env, true).unwrap();
 
 			assert!(matches!(result, EvalResult::Entity(id) if id == source));
 
@@ -1912,7 +1923,9 @@ mod tests {
 				span: 0..0,
 			}));
 
-			let evidence_result = engine.eval_expr(&mut model, &add_evidence, &env).unwrap();
+			let evidence_result = engine
+				.eval_expr(&mut model, &add_evidence, &env, true)
+				.unwrap();
 			let evidence = match evidence_result {
 				EvalResult::Entity(id) => id,
 				_ => panic!("Expected entity"),
@@ -1932,7 +1945,7 @@ mod tests {
 				span: 0..0,
 			}));
 
-			engine.eval_expr(&mut model, &add_link, &env).unwrap();
+			engine.eval_expr(&mut model, &add_link, &env, true).unwrap();
 
 			assert!(
 				model.has_type(evidence, evidence_type),
@@ -1948,386 +1961,36 @@ mod tests {
 				"Store should contain evidence"
 			);
 		}
-	}
-
-	// ==================== Match/As Conversion ====================
-	mod match_as_conversion {
-		use super::*;
 
 		#[test]
-		fn should_valid_value() {
-			let mut model = Model::bootstrap();
-			model.ensure_namespace("aws").unwrap();
-			model.ensure_namespace("my").unwrap();
-
-			let enum_type = model.ensure_entity("my:Criticality").unwrap();
-			model.apply_to(enum_type, "wa2:type", "wa2:Type").unwrap();
-
-			let variant_high = model.ensure_entity("my:High").unwrap();
-			model
-				.apply_entity(variant_high, "wa2:subTypeOf", enum_type)
-				.unwrap();
-
-			let variant_low = model.ensure_entity("my:Low").unwrap();
-			model
-				.apply_entity(variant_low, "wa2:subTypeOf", enum_type)
-				.unwrap();
-
-			let tag = model.blank();
-			model.apply_to(tag, "aws:Value", "\"High\"").unwrap();
-
-			let match_expr = MatchExpr {
-				value: Expr::Query(QueryExpr {
-					path: QueryPath {
-						steps: vec![
-							QueryStep {
-								axis: Axis::Child,
-								node_test: Some(QualifiedName {
-									namespace: None,
-									name: "tag".to_string(),
-									span: 0..0,
-								}),
-								predicates: vec![],
-								span: 0..0,
-							},
-							QueryStep {
-								axis: Axis::Child,
-								node_test: Some(QualifiedName {
-									namespace: Some("aws".to_string()),
-									name: "Value".to_string(),
-									span: 0..0,
-								}),
-								predicates: vec![],
-								span: 0..0,
-							},
-						],
-						span: 0..0,
-					},
-					span: 0..0,
-				}),
-				as_type: Some(AsExpr {
-					target_type: QualifiedName {
-						namespace: Some("my".to_string()),
-						name: "Criticality".to_string(),
-						span: 0..0,
-					},
-					mode: Modal::Should,
-					span: 0..0,
-				}),
-				arms: vec![
-					MatchArm {
-						patterns: vec![MatchPattern::Variant("High".to_string())],
-						result: Expr::Bool(true, 0..0),
-						span: 0..0,
-					},
-					MatchArm {
-						patterns: vec![MatchPattern::Else],
-						result: Expr::Bool(false, 0..0),
-						span: 0..0,
-					},
-				],
-				span: 0..0,
-			};
-
+		fn add_not_allowed_in_rules() {
 			let engine = RuleEngine::new();
-			let mut env = Env::new();
-			env.bind("tag".to_string(), EvalResult::Entity(tag));
-
-			let result = engine
-				.eval_expr(&mut model, &Expr::Match(Box::new(match_expr)), &env)
-				.unwrap();
-
-			assert!(matches!(result, EvalResult::Literal(s) if s == "true"));
-
-			let failures: Vec<_> = (0..model.entity_count())
-				.filter_map(|i| {
-					let e = EntityId(i as u32);
-					if model.has_type(
-						e,
-						model.resolve("core:AssertFailure").unwrap_or(EntityId(0)),
-					) {
-						Some(e)
-					} else {
-						None
-					}
-				})
-				.collect();
-			assert!(
-				failures.is_empty(),
-				"Valid value should not create failures"
-			);
-		}
-
-		#[test]
-		fn should_invalid_value_creates_warning() {
 			let mut model = Model::bootstrap();
-			model.ensure_namespace("aws").unwrap();
-			model.ensure_namespace("my").unwrap();
-			model.ensure_namespace("core").unwrap();
+			model.ensure_namespace("test").unwrap();
 
-			let enum_type = model.ensure_entity("my:Criticality").unwrap();
-			model.apply_to(enum_type, "wa2:type", "wa2:Type").unwrap();
+			model.ensure_entity("test:Marker").unwrap();
 
-			let variant_high = model.ensure_entity("my:High").unwrap();
-			model
-				.apply_entity(variant_high, "wa2:subTypeOf", enum_type)
-				.unwrap();
+			let env = Env::new();
 
-			let tag = model.blank();
-			model
-				.apply_to(tag, "aws:Value", "\"InvalidValue\"")
-				.unwrap();
-
-			let match_expr = MatchExpr {
-				value: Expr::Query(QueryExpr {
-					path: QueryPath {
-						steps: vec![
-							QueryStep {
-								axis: Axis::Child,
-								node_test: Some(QualifiedName {
-									namespace: None,
-									name: "tag".to_string(),
-									span: 0..0,
-								}),
-								predicates: vec![],
-								span: 0..0,
-							},
-							QueryStep {
-								axis: Axis::Child,
-								node_test: Some(QualifiedName {
-									namespace: Some("aws".to_string()),
-									name: "Value".to_string(),
-									span: 0..0,
-								}),
-								predicates: vec![],
-								span: 0..0,
-							},
-						],
-						span: 0..0,
-					},
+			let expr = Expr::Add(Box::new(AddExpr {
+				subject: Expr::Blank(0..0),
+				predicate: QualifiedName {
+					namespace: Some("wa2".to_string()),
+					name: "type".to_string(),
+					span: 0..0,
+				},
+				object: Expr::QName(QualifiedName {
+					namespace: Some("test".to_string()),
+					name: "Marker".to_string(),
 					span: 0..0,
 				}),
-				as_type: Some(AsExpr {
-					target_type: QualifiedName {
-						namespace: Some("my".to_string()),
-						name: "Criticality".to_string(),
-						span: 0..0,
-					},
-					mode: Modal::Should,
-					span: 0..0,
-				}),
-				arms: vec![
-					MatchArm {
-						patterns: vec![MatchPattern::Variant("High".to_string())],
-						result: Expr::Bool(true, 0..0),
-						span: 0..0,
-					},
-					MatchArm {
-						patterns: vec![MatchPattern::Else],
-						result: Expr::Bool(false, 0..0),
-						span: 0..0,
-					},
-				],
 				span: 0..0,
-			};
+			}));
 
-			let engine = RuleEngine::new();
-			let mut env = Env::new();
-			env.bind("tag".to_string(), EvalResult::Entity(tag));
-
-			let result = engine
-				.eval_expr(&mut model, &Expr::Match(Box::new(match_expr)), &env)
-				.unwrap();
-
-			assert!(matches!(result, EvalResult::Empty));
-
-			if let Some(failure_type) = model.resolve("core:AssertFailure") {
-				let failures: Vec<_> = (0..model.entity_count())
-					.filter(|i| {
-						let e = EntityId(*i as u32);
-						model.has_type(e, failure_type)
-					})
-					.collect();
-				assert_eq!(failures.len(), 1, "Should create one failure");
-			}
-		}
-
-		#[test]
-		fn may_invalid_value_no_warning() {
-			let mut model = Model::bootstrap();
-			model.ensure_namespace("aws").unwrap();
-			model.ensure_namespace("my").unwrap();
-
-			let enum_type = model.ensure_entity("my:Criticality").unwrap();
-			model.apply_to(enum_type, "wa2:type", "wa2:Type").unwrap();
-
-			let variant_high = model.ensure_entity("my:High").unwrap();
-			model
-				.apply_entity(variant_high, "wa2:subTypeOf", enum_type)
-				.unwrap();
-
-			let tag = model.blank();
-			model
-				.apply_to(tag, "aws:Value", "\"InvalidValue\"")
-				.unwrap();
-
-			let match_expr = MatchExpr {
-				value: Expr::Query(QueryExpr {
-					path: QueryPath {
-						steps: vec![
-							QueryStep {
-								axis: Axis::Child,
-								node_test: Some(QualifiedName {
-									namespace: None,
-									name: "tag".to_string(),
-									span: 0..0,
-								}),
-								predicates: vec![],
-								span: 0..0,
-							},
-							QueryStep {
-								axis: Axis::Child,
-								node_test: Some(QualifiedName {
-									namespace: Some("aws".to_string()),
-									name: "Value".to_string(),
-									span: 0..0,
-								}),
-								predicates: vec![],
-								span: 0..0,
-							},
-						],
-						span: 0..0,
-					},
-					span: 0..0,
-				}),
-				as_type: Some(AsExpr {
-					target_type: QualifiedName {
-						namespace: Some("my".to_string()),
-						name: "Criticality".to_string(),
-						span: 0..0,
-					},
-					mode: Modal::May,
-					span: 0..0,
-				}),
-				arms: vec![
-					MatchArm {
-						patterns: vec![MatchPattern::Variant("High".to_string())],
-						result: Expr::Bool(true, 0..0),
-						span: 0..0,
-					},
-					MatchArm {
-						patterns: vec![MatchPattern::Else],
-						result: Expr::Bool(false, 0..0),
-						span: 0..0,
-					},
-				],
-				span: 0..0,
-			};
-
-			let engine = RuleEngine::new();
-			let mut env = Env::new();
-			env.bind("tag".to_string(), EvalResult::Entity(tag));
-
-			let result = engine
-				.eval_expr(&mut model, &Expr::Match(Box::new(match_expr)), &env)
-				.unwrap();
-
-			assert!(matches!(result, EvalResult::Literal(s) if s == "false"));
-
-			if let Some(failure_type) = model.resolve("core:AssertFailure") {
-				let failures: Vec<_> = (0..model.entity_count())
-					.filter(|i| {
-						let e = EntityId(*i as u32);
-						model.has_type(e, failure_type)
-					})
-					.collect();
-				assert!(failures.is_empty(), "May mode should not create failures");
-			}
-		}
-
-		#[test]
-		fn type_not_found_always_errors() {
-			let mut model = Model::bootstrap();
-			model.ensure_namespace("aws").unwrap();
-			model.ensure_namespace("my").unwrap();
-			model.ensure_namespace("core").unwrap();
-
-			let tag = model.blank();
-			model.apply_to(tag, "aws:Value", "\"SomeValue\"").unwrap();
-
-			let make_match_expr = |mode: Modal| MatchExpr {
-				value: Expr::Query(QueryExpr {
-					path: QueryPath {
-						steps: vec![
-							QueryStep {
-								axis: Axis::Child,
-								node_test: Some(QualifiedName {
-									namespace: None,
-									name: "tag".to_string(),
-									span: 0..0,
-								}),
-								predicates: vec![],
-								span: 0..0,
-							},
-							QueryStep {
-								axis: Axis::Child,
-								node_test: Some(QualifiedName {
-									namespace: Some("aws".to_string()),
-									name: "Value".to_string(),
-									span: 0..0,
-								}),
-								predicates: vec![],
-								span: 0..0,
-							},
-						],
-						span: 0..0,
-					},
-					span: 0..0,
-				}),
-				as_type: Some(AsExpr {
-					target_type: QualifiedName {
-						namespace: Some("my".to_string()),
-						name: "NonExistentType".to_string(),
-						span: 0..0,
-					},
-					mode,
-					span: 0..0,
-				}),
-				arms: vec![
-					MatchArm {
-						patterns: vec![MatchPattern::Variant("A".to_string())],
-						result: Expr::Bool(true, 0..0),
-						span: 0..0,
-					},
-					MatchArm {
-						patterns: vec![MatchPattern::Else],
-						result: Expr::Bool(false, 0..0),
-						span: 0..0,
-					},
-				],
-				span: 0..0,
-			};
-
-			let engine = RuleEngine::new();
-			let mut env = Env::new();
-			env.bind("tag".to_string(), EvalResult::Entity(tag));
-
-			for mode in [Modal::Should, Modal::May, Modal::Must] {
-				let result = engine.eval_expr(
-					&mut model,
-					&Expr::Match(Box::new(make_match_expr(mode))),
-					&env,
-				);
-				assert!(
-					result.is_err(),
-					"Type not found with {:?} should error",
-					mode
-				);
-				assert!(
-					result.unwrap_err().message.contains("not found"),
-					"Error should mention type not found"
-				);
-			}
+			// is_derive=false means this is a rule context
+			let result = engine.eval_expr(&mut model, &expr, &env, false);
+			assert!(result.is_err());
+			assert!(result.unwrap_err().message.contains("not allowed in rules"));
 		}
 	}
 
@@ -2603,7 +2266,7 @@ mod tests {
 					span: 0..0,
 				});
 
-				let result = engine.eval_expr(&mut model, &query, &env).unwrap();
+				let result = engine.eval_expr(&mut model, &query, &env, false).unwrap();
 
 				// Should return the tag entity
 				if let EvalResult::Set(entities) = result {
@@ -2652,7 +2315,7 @@ mod tests {
 					span: 0..0,
 				});
 
-				let result = engine.eval_expr(&mut model, &query, &env).unwrap();
+				let result = engine.eval_expr(&mut model, &query, &env, false).unwrap();
 
 				// Unbound variable treated as type lookup, returns empty
 				assert!(
@@ -2719,7 +2382,7 @@ mod tests {
 					span: 0..0,
 				});
 
-				let result = engine.eval_expr(&mut model, &query, &env).unwrap();
+				let result = engine.eval_expr(&mut model, &query, &env, false).unwrap();
 
 				if let EvalResult::Set(tags) = result {
 					assert_eq!(tags.len(), 2, "Should find both tags");
@@ -3277,8 +2940,6 @@ mod tests {
 
 	// ==================== Findings Structure ====================
 	mod findings_structure {
-		use crate::intents::model::Value;
-
 		use super::*;
 
 		#[test]
@@ -3831,8 +3492,6 @@ mod tests {
 
 	// ==================== Fixed-Point Iteration ====================
 	mod fixed_point {
-		use crate::intents::model::Value;
-
 		use super::*;
 
 		#[test]
@@ -3903,86 +3562,6 @@ mod tests {
 		}
 
 		#[test]
-		fn deferred_must_fails_if_still_unsatisfied() {
-			let mut model = Model::bootstrap();
-			model.ensure_namespace("core").unwrap();
-			model.ensure_namespace("test").unwrap();
-
-			let item_type = model.ensure_entity("test:Item").unwrap();
-			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
-
-			let item = model.blank();
-			model.apply_entity(item, "wa2:type", item_type).unwrap();
-
-			// Rule requires NonExistent - will never be satisfied
-			let rule = Rule {
-				name: "require_impossible".to_string(),
-				body: vec![Statement::For(ForStmt {
-					var: "x".to_string(),
-					collection: Expr::Query(QueryExpr {
-						path: QueryPath {
-							steps: vec![QueryStep {
-								axis: Axis::Child,
-								node_test: Some(QualifiedName {
-									namespace: Some("test".to_string()),
-									name: "Item".to_string(),
-									span: 0..0,
-								}),
-								predicates: vec![],
-								span: 0..0,
-							}],
-							span: 0..0,
-						},
-						span: 0..0,
-					}),
-					body: vec![Statement::Modal(ModalStmt {
-						modal: Modal::Must,
-						expr: Expr::Query(QueryExpr {
-							path: QueryPath {
-								steps: vec![QueryStep {
-									axis: Axis::Child,
-									node_test: Some(QualifiedName {
-										namespace: Some("core".to_string()),
-										name: "NonExistent".to_string(),
-										span: 0..0,
-									}),
-									predicates: vec![],
-									span: 0..0,
-								}],
-								span: 0..0,
-							},
-							span: 0..0,
-						}),
-						metadata: None,
-						span: 0..0,
-					})],
-					span: 0..0,
-				})],
-				span: 0..0,
-			};
-
-			let mut engine = RuleEngine::new();
-			engine
-				.run_with_modals(&mut model, &[], &[rule], &HashMap::new())
-				.unwrap();
-
-			// Should have a failure
-			let failure_type = model.resolve("core:AssertFailure").unwrap();
-			let failures: Vec<_> = (0..model.entity_count())
-				.filter(|i| {
-					let e = EntityId(*i as u32);
-					model.has_type(e, failure_type)
-				})
-				.collect();
-
-			assert_eq!(
-				failures.len(),
-				1,
-				"Deferred must should fail if never satisfied"
-			);
-		}
-
-		#[test]
 		fn processed_tracking_prevents_duplicate_execution() {
 			let mut model = Model::bootstrap();
 			model.ensure_namespace("test").unwrap();
@@ -3998,9 +3577,9 @@ mod tests {
 			let item = model.blank();
 			model.apply_entity(item, "wa2:type", item_type).unwrap();
 
-			// Rule that creates a new Counter for each Item
+			// Derive that creates a new Counter for each Item
 			// Without processed tracking, this would run infinitely or create many counters
-			let rule = Rule {
+			let derive = Derive {
 				name: "create_counter".to_string(),
 				body: vec![Statement::For(ForStmt {
 					var: "x".to_string(),
@@ -4040,7 +3619,7 @@ mod tests {
 			};
 
 			let mut engine = RuleEngine::new();
-			engine.run(&mut model, &[rule]).unwrap();
+			engine.run_derives(&mut model, &[derive]).unwrap();
 
 			// Should have exactly one Counter (processed tracking prevents re-execution)
 			let counters: Vec<_> = (0..model.entity_count())
@@ -4194,9 +3773,14 @@ mod tests {
 				"Node C should be reachable (2nd iteration)"
 			);
 		}
+	}
+
+	// ==================== Policy Ordering ====================
+	mod policy_ordering {
+		use super::*;
 
 		#[test]
-		fn deferred_must_reevaluated_after_derives() {
+		fn must_rule_failure_stops_policy() {
 			let mut model = Model::bootstrap();
 			model.ensure_namespace("core").unwrap();
 			model.ensure_namespace("test").unwrap();
@@ -4204,19 +3788,776 @@ mod tests {
 			let item_type = model.ensure_entity("test:Item").unwrap();
 			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
 
-			// Create a marker entity for validated status
-			let validated_marker = model.ensure_entity("test:ValidatedMarker").unwrap();
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
 
-			// Ensure predicate exists
-			model.ensure_entity("test:validated").unwrap();
+			// First rule - will fail
+			let rule1 = Rule {
+				name: "first_rule".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Must,
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![QueryStep {
+									axis: Axis::Child,
+									node_test: Some(QualifiedName {
+										namespace: Some("core".to_string()),
+										name: "NonExistent".to_string(),
+										span: 0..0,
+									}),
+									predicates: vec![],
+									span: 0..0,
+								}],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			// Second rule - should not run if first fails with must
+			let rule2 = Rule {
+				name: "second_rule".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Must,
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![QueryStep {
+									axis: Axis::Child,
+									node_test: Some(QualifiedName {
+										namespace: Some("core".to_string()),
+										name: "AlsoNonExistent".to_string(),
+										span: 0..0,
+									}),
+									predicates: vec![],
+									span: 0..0,
+								}],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let rules_map: HashMap<String, Rule> = vec![
+				("first_rule".to_string(), rule1),
+				("second_rule".to_string(), rule2),
+			]
+			.into_iter()
+			.collect();
+
+			let bindings = vec![
+				PolicyBinding {
+					modal: Modal::Must,
+					rule_name: QualifiedName {
+						namespace: None,
+						name: "first_rule".to_string(),
+						span: 0..0,
+					},
+					span: 0..0,
+				},
+				PolicyBinding {
+					modal: Modal::Must,
+					rule_name: QualifiedName {
+						namespace: None,
+						name: "second_rule".to_string(),
+						span: 0..0,
+					},
+					span: 0..0,
+				},
+			];
+
+			let mut engine = RuleEngine::new();
+			let outcome = engine
+				.run_with_policy(&mut model, &[], &rules_map, &bindings)
+				.unwrap();
+
+			assert_eq!(outcome, PolicyOutcome::Fail);
+
+			// Should only have one failure (from first rule)
+			let failure_type = model.resolve("core:AssertFailure").unwrap();
+			let failures: Vec<_> = (0..model.entity_count())
+				.filter(|i| {
+					let e = EntityId(*i as u32);
+					model.has_type(e, failure_type)
+				})
+				.collect();
+
+			assert_eq!(
+				failures.len(),
+				1,
+				"Only first rule should have run before guard stopped policy"
+			);
+		}
+
+		#[test]
+		fn should_rule_failure_continues_policy() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("core").unwrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
 
 			let item = model.blank();
 			model.apply_entity(item, "wa2:type", item_type).unwrap();
-			// Note: item does NOT have validated yet
 
-			// Derive adds validated marker
+			// First rule - will fail but is should
+			let rule1 = Rule {
+				name: "first_rule".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Must, // Error-level finding
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![QueryStep {
+									axis: Axis::Child,
+									node_test: Some(QualifiedName {
+										namespace: Some("core".to_string()),
+										name: "NonExistent".to_string(),
+										span: 0..0,
+									}),
+									predicates: vec![],
+									span: 0..0,
+								}],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			// Second rule - should run even though first failed
+			let rule2 = Rule {
+				name: "second_rule".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Must,
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![QueryStep {
+									axis: Axis::Child,
+									node_test: Some(QualifiedName {
+										namespace: Some("core".to_string()),
+										name: "AlsoNonExistent".to_string(),
+										span: 0..0,
+									}),
+									predicates: vec![],
+									span: 0..0,
+								}],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let rules_map: HashMap<String, Rule> = vec![
+				("first_rule".to_string(), rule1),
+				("second_rule".to_string(), rule2),
+			]
+			.into_iter()
+			.collect();
+
+			let bindings = vec![
+				PolicyBinding {
+					modal: Modal::Should, // should at policy level means continue even on error
+					rule_name: QualifiedName {
+						namespace: None,
+						name: "first_rule".to_string(),
+						span: 0..0,
+					},
+					span: 0..0,
+				},
+				PolicyBinding {
+					modal: Modal::Must,
+					rule_name: QualifiedName {
+						namespace: None,
+						name: "second_rule".to_string(),
+						span: 0..0,
+					},
+					span: 0..0,
+				},
+			];
+
+			let mut engine = RuleEngine::new();
+			let outcome = engine
+				.run_with_policy(&mut model, &[], &rules_map, &bindings)
+				.unwrap();
+
+			// Second rule also fails with must, so policy fails
+			assert_eq!(outcome, PolicyOutcome::Fail);
+
+			// Should have two failures (both rules ran)
+			let failure_type = model.resolve("core:AssertFailure").unwrap();
+			let failures: Vec<_> = (0..model.entity_count())
+				.filter(|i| {
+					let e = EntityId(*i as u32);
+					model.has_type(e, failure_type)
+				})
+				.collect();
+
+			assert_eq!(
+				failures.len(),
+				2,
+				"Both rules should have run because first was 'should' at policy level"
+			);
+		}
+
+		#[test]
+		fn all_rules_pass_returns_pass() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("core").unwrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
+
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
+
+			// Rule that passes
+			let rule = Rule {
+				name: "passing_rule".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Must,
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![QueryStep {
+									axis: Axis::Child,
+									node_test: Some(QualifiedName {
+										namespace: Some("test".to_string()),
+										name: "Item".to_string(), // This type exists
+										span: 0..0,
+									}),
+									predicates: vec![],
+									span: 0..0,
+								}],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let rules_map: HashMap<String, Rule> = vec![("passing_rule".to_string(), rule)]
+				.into_iter()
+				.collect();
+
+			let bindings = vec![PolicyBinding {
+				modal: Modal::Must,
+				rule_name: QualifiedName {
+					namespace: None,
+					name: "passing_rule".to_string(),
+					span: 0..0,
+				},
+				span: 0..0,
+			}];
+
+			let mut engine = RuleEngine::new();
+			let outcome = engine
+				.run_with_policy(&mut model, &[], &rules_map, &bindings)
+				.unwrap();
+
+			assert_eq!(outcome, PolicyOutcome::Pass);
+		}
+
+		#[test]
+		fn may_rule_always_continues() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("core").unwrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
+
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
+
+			// First rule - fails with must (creates Error)
+			let rule1 = Rule {
+				name: "first_rule".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Must,
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![QueryStep {
+									axis: Axis::Child,
+									node_test: Some(QualifiedName {
+										namespace: Some("core".to_string()),
+										name: "NonExistent".to_string(),
+										span: 0..0,
+									}),
+									predicates: vec![],
+									span: 0..0,
+								}],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			// Second rule
+			let rule2 = Rule {
+				name: "second_rule".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Must,
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![QueryStep {
+									axis: Axis::Child,
+									node_test: Some(QualifiedName {
+										namespace: Some("core".to_string()),
+										name: "AlsoNonExistent".to_string(),
+										span: 0..0,
+									}),
+									predicates: vec![],
+									span: 0..0,
+								}],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let rules_map: HashMap<String, Rule> = vec![
+				("first_rule".to_string(), rule1),
+				("second_rule".to_string(), rule2),
+			]
+			.into_iter()
+			.collect();
+
+			// First rule is may at policy level - always continues
+			let bindings = vec![
+				PolicyBinding {
+					modal: Modal::May,
+					rule_name: QualifiedName {
+						namespace: None,
+						name: "first_rule".to_string(),
+						span: 0..0,
+					},
+					span: 0..0,
+				},
+				PolicyBinding {
+					modal: Modal::Must,
+					rule_name: QualifiedName {
+						namespace: None,
+						name: "second_rule".to_string(),
+						span: 0..0,
+					},
+					span: 0..0,
+				},
+			];
+
+			let mut engine = RuleEngine::new();
+			let outcome = engine
+				.run_with_policy(&mut model, &[], &rules_map, &bindings)
+				.unwrap();
+
+			// Second rule fails with must at policy level
+			assert_eq!(outcome, PolicyOutcome::Fail);
+
+			// Both rules ran (two failures)
+			let failure_type = model.resolve("core:AssertFailure").unwrap();
+			let failures: Vec<_> = (0..model.entity_count())
+				.filter(|i| {
+					let e = EntityId(*i as u32);
+					model.has_type(e, failure_type)
+				})
+				.collect();
+
+			assert_eq!(
+				failures.len(),
+				2,
+				"Both rules should run because first was 'may'"
+			);
+		}
+
+		#[test]
+		fn degraded_when_should_fails_but_no_must_fails() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("core").unwrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
+
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
+
+			// Rule that creates Error-level finding
+			let failing_rule = Rule {
+				name: "failing_rule".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Must, // Creates Error finding
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![QueryStep {
+									axis: Axis::Child,
+									node_test: Some(QualifiedName {
+										namespace: Some("core".to_string()),
+										name: "NonExistent".to_string(),
+										span: 0..0,
+									}),
+									predicates: vec![],
+									span: 0..0,
+								}],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let rules_map: HashMap<String, Rule> = vec![("failing_rule".to_string(), failing_rule)]
+				.into_iter()
+				.collect();
+
+			// Rule bound with should at policy level
+			let bindings = vec![PolicyBinding {
+				modal: Modal::Should,
+				rule_name: QualifiedName {
+					namespace: None,
+					name: "failing_rule".to_string(),
+					span: 0..0,
+				},
+				span: 0..0,
+			}];
+
+			let mut engine = RuleEngine::new();
+			let outcome = engine
+				.run_with_policy(&mut model, &[], &rules_map, &bindings)
+				.unwrap();
+
+			assert_eq!(
+				outcome,
+				PolicyOutcome::Degraded,
+				"Should return Degraded when should-bound rule fails"
+			);
+		}
+
+		#[test]
+		fn rule_with_only_warnings_still_passes() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("core").unwrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
+
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
+
+			// Rule that creates Warning (should), not Error (must)
+			let rule = Rule {
+				name: "warning_rule".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Modal(ModalStmt {
+						modal: Modal::Should, // Creates Warning, not Error
+						expr: Expr::Query(QueryExpr {
+							path: QueryPath {
+								steps: vec![QueryStep {
+									axis: Axis::Child,
+									node_test: Some(QualifiedName {
+										namespace: Some("core".to_string()),
+										name: "NonExistent".to_string(),
+										span: 0..0,
+									}),
+									predicates: vec![],
+									span: 0..0,
+								}],
+								span: 0..0,
+							},
+							span: 0..0,
+						}),
+						metadata: None,
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
+			};
+
+			let rules_map: HashMap<String, Rule> = vec![("warning_rule".to_string(), rule)]
+				.into_iter()
+				.collect();
+
+			// Rule bound with must at policy level
+			let bindings = vec![PolicyBinding {
+				modal: Modal::Must,
+				rule_name: QualifiedName {
+					namespace: None,
+					name: "warning_rule".to_string(),
+					span: 0..0,
+				},
+				span: 0..0,
+			}];
+
+			let mut engine = RuleEngine::new();
+			let outcome = engine
+				.run_with_policy(&mut model, &[], &rules_map, &bindings)
+				.unwrap();
+
+			// Rule "passes" because it created no Error-level findings
+			assert_eq!(
+				outcome,
+				PolicyOutcome::Pass,
+				"Rule with only warnings should pass at policy level"
+			);
+
+			// But we did create a warning
+			let failure_type = model.resolve("core:AssertFailure").unwrap();
+			let failures: Vec<_> = (0..model.entity_count())
+				.filter(|i| {
+					let e = EntityId(*i as u32);
+					model.has_type(e, failure_type)
+				})
+				.collect();
+			assert_eq!(failures.len(), 1, "Should have created one warning");
+		}
+
+		#[test]
+		fn empty_bindings_returns_pass() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("core").unwrap();
+
+			let rules_map: HashMap<String, Rule> = HashMap::new();
+			let bindings: Vec<PolicyBinding> = vec![];
+
+			let mut engine = RuleEngine::new();
+			let outcome = engine
+				.run_with_policy(&mut model, &[], &rules_map, &bindings)
+				.unwrap();
+
+			assert_eq!(outcome, PolicyOutcome::Pass, "Empty policy should pass");
+		}
+	}
+
+	// ==================== Two-Phase Execution ====================
+	mod two_phase_execution {
+		use super::*;
+
+		#[test]
+		fn derives_complete_before_rules_run() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("core").unwrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
+
+			let evidence_type = model.ensure_entity("test:Evidence").unwrap();
+			model
+				.apply_to(evidence_type, "wa2:type", "wa2:Type")
+				.unwrap();
+
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
+
+			// Derive adds evidence to item
 			let derive = Derive {
-				name: "add_validated".to_string(),
+				name: "add_evidence".to_string(),
 				body: vec![Statement::For(ForStmt {
 					var: "x".to_string(),
 					collection: Expr::Query(QueryExpr {
@@ -4239,14 +4580,23 @@ mod tests {
 						subject: Expr::Var("x".to_string(), 0..0),
 						predicate: QualifiedName {
 							namespace: Some("test".to_string()),
-							name: "validated".to_string(),
+							name: "hasEvidence".to_string(),
 							span: 0..0,
 						},
-						object: Expr::QName(QualifiedName {
-							namespace: Some("test".to_string()),
-							name: "ValidatedMarker".to_string(),
+						object: Expr::Add(Box::new(AddExpr {
+							subject: Expr::Blank(0..0),
+							predicate: QualifiedName {
+								namespace: Some("wa2".to_string()),
+								name: "type".to_string(),
+								span: 0..0,
+							},
+							object: Expr::QName(QualifiedName {
+								namespace: Some("test".to_string()),
+								name: "Evidence".to_string(),
+								span: 0..0,
+							}),
 							span: 0..0,
-						}),
+						})),
 						span: 0..0,
 					})],
 					span: 0..0,
@@ -4254,9 +4604,9 @@ mod tests {
 				span: 0..0,
 			};
 
-			// Rule requires validated predicate - initially fails, but derive will fix it
+			// Rule checks for evidence (will pass because derive ran first)
 			let rule = Rule {
-				name: "require_validated".to_string(),
+				name: "check_evidence".to_string(),
 				body: vec![Statement::For(ForStmt {
 					var: "x".to_string(),
 					collection: Expr::Query(QueryExpr {
@@ -4294,7 +4644,7 @@ mod tests {
 										axis: Axis::Child,
 										node_test: Some(QualifiedName {
 											namespace: Some("test".to_string()),
-											name: "validated".to_string(),
+											name: "hasEvidence".to_string(),
 											span: 0..0,
 										}),
 										predicates: vec![],
@@ -4313,38 +4663,99 @@ mod tests {
 				span: 0..0,
 			};
 
+			let rules_map: HashMap<String, Rule> = vec![("check_evidence".to_string(), rule)]
+				.into_iter()
+				.collect();
+
+			let bindings = vec![PolicyBinding {
+				modal: Modal::Must,
+				rule_name: QualifiedName {
+					namespace: None,
+					name: "check_evidence".to_string(),
+					span: 0..0,
+				},
+				span: 0..0,
+			}];
+
 			let mut engine = RuleEngine::new();
-			engine
-				.run_with_modals(&mut model, &[derive], &[rule], &HashMap::new())
+			let outcome = engine
+				.run_with_policy(&mut model, &[derive], &rules_map, &bindings)
 				.unwrap();
 
-			// Item should have validated marker (from derive)
-			let validated_pred = model.resolve("test:validated").unwrap();
-			let values = model.get_all(item, validated_pred);
-			assert!(
-				values
-					.iter()
-					.any(|v| matches!(v, Value::Entity(e) if *e == validated_marker)),
-				"Derive should have added validated marker"
+			assert_eq!(
+				outcome,
+				PolicyOutcome::Pass,
+				"Rule should pass because derive added evidence first"
 			);
+		}
 
-			// Should NOT have any failures (deferred must re-evaluated after derive added validated)
-			// Note: core:AssertFailure may not exist if no failures were created (which is the success case)
-			let failures = if let Some(failure_type) = model.resolve("core:AssertFailure") {
-				(0..model.entity_count())
-					.filter(|i| {
-						let e = EntityId(*i as u32);
-						model.has_type(e, failure_type)
-					})
-					.count()
-			} else {
-				0 // No failure type means no failures
+		#[test]
+		fn add_statement_rejected_in_rules() {
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("test").unwrap();
+
+			let item_type = model.ensure_entity("test:Item").unwrap();
+			model.apply_to(item_type, "wa2:type", "wa2:Type").unwrap();
+
+			let item = model.blank();
+			model.apply_entity(item, "wa2:type", item_type).unwrap();
+
+			// Rule with add statement (should fail)
+			let rule = Rule {
+				name: "bad_rule".to_string(),
+				body: vec![Statement::For(ForStmt {
+					var: "x".to_string(),
+					collection: Expr::Query(QueryExpr {
+						path: QueryPath {
+							steps: vec![QueryStep {
+								axis: Axis::Child,
+								node_test: Some(QualifiedName {
+									namespace: Some("test".to_string()),
+									name: "Item".to_string(),
+									span: 0..0,
+								}),
+								predicates: vec![],
+								span: 0..0,
+							}],
+							span: 0..0,
+						},
+						span: 0..0,
+					}),
+					body: vec![Statement::Add(AddStmt {
+						subject: Expr::Var("x".to_string(), 0..0),
+						predicate: QualifiedName {
+							namespace: Some("test".to_string()),
+							name: "tag".to_string(),
+							span: 0..0,
+						},
+						object: Expr::String("value".to_string(), 0..0),
+						span: 0..0,
+					})],
+					span: 0..0,
+				})],
+				span: 0..0,
 			};
 
-			assert_eq!(
-				failures, 0,
-				"Deferred must should pass after derive adds validated predicate"
-			);
+			let mut engine = RuleEngine::new();
+			let result = engine.run(&mut model, &[rule]);
+
+			assert!(result.is_err());
+			assert!(result.unwrap_err().message.contains("not allowed in rules"));
+		}
+
+		#[test]
+		fn blank_node_rejected_in_rules() {
+			let engine = RuleEngine::new();
+			let mut model = Model::bootstrap();
+			model.ensure_namespace("test").unwrap();
+
+			let env = Env::new();
+
+			// Blank node expression should fail in rule context
+			let result = engine.eval_expr_to_entity(&mut model, &Expr::Blank(0..0), &env, false);
+
+			assert!(result.is_err());
+			assert!(result.unwrap_err().message.contains("not allowed in rules"));
 		}
 	}
 }

@@ -862,14 +862,7 @@ fn parse_query_expr_keyword(p: &mut Parser) -> Result<Expr, ParseError> {
 fn parse_match_expr(p: &mut Parser) -> Result<Expr, ParseError> {
 	let start = p.span.start;
 	p.expect(Token::KwMatch)?;
-	let value = parse_primary_expr(p)?; // Changed from parse_expr
-
-	// Optional as(Type, mode)
-	let as_type = if p.at(&Token::KwAs) {
-		Some(parse_as_expr(p)?)
-	} else {
-		None
-	};
+	let value = parse_expr(p)?;
 
 	p.expect(Token::LBrace)?;
 
@@ -886,47 +879,9 @@ fn parse_match_expr(p: &mut Parser) -> Result<Expr, ParseError> {
 
 	Ok(Expr::Match(Box::new(MatchExpr {
 		value,
-		as_type,
 		arms,
 		span: start..p.span.end,
 	})))
-}
-
-fn parse_as_expr(p: &mut Parser) -> Result<AsExpr, ParseError> {
-	let start = p.span.start;
-	p.expect(Token::KwAs)?;
-	p.expect(Token::LParen)?;
-	let target_type = parse_qualified_name(p)?;
-	p.expect(Token::Comma)?;
-
-	let mode = match &p.current {
-		Some(Token::KwMust) => {
-			p.advance();
-			Modal::Must
-		}
-		Some(Token::KwShould) => {
-			p.advance();
-			Modal::Should
-		}
-		Some(Token::KwMay) => {
-			p.advance();
-			Modal::May
-		}
-		other => {
-			return Err(ParseError {
-				message: format!("expected 'must', 'should', or 'may', got {:?}", other),
-				span: p.span.clone(),
-			});
-		}
-	};
-
-	p.expect(Token::RParen)?;
-
-	Ok(AsExpr {
-		target_type,
-		mode,
-		span: start..p.span.end,
-	})
 }
 
 fn parse_match_arm(p: &mut Parser) -> Result<MatchArm, ParseError> {
@@ -1948,102 +1903,7 @@ rule test {
 	}
 
 	#[test]
-	fn parse_match_with_as_must() {
-		let src = r#"
-namespace my {}
-
-rule test {
-    let x = match query(v/value) as(my:Type, must) {
-        A => true,
-        else => false
-    }
-}
-"#;
-		let source = Wa2Source::from_str(src);
-		let ast = parse(source.lexer()).unwrap();
-
-		match &ast.items[1] {
-			Item::Rule(r) => match &r.body[0] {
-				Statement::Let(l) => match &l.value {
-					Expr::Match(m) => {
-						assert!(m.as_type.is_some());
-						let as_expr = m.as_type.as_ref().unwrap();
-						assert_eq!(as_expr.target_type.namespace, Some("my".to_string()));
-						assert_eq!(as_expr.target_type.name, "Type");
-						assert_eq!(as_expr.mode, Modal::Must);
-					}
-					_ => panic!("expected match"),
-				},
-				_ => panic!("expected let"),
-			},
-			_ => panic!("expected rule"),
-		}
-	}
-
-	#[test]
-	fn parse_match_with_as_should() {
-		let src = r#"
-namespace my {}
-
-rule test {
-    let x = match query(v/value) as(my:Type, should) {
-        A => true,
-        else => false
-    }
-}
-"#;
-		let source = Wa2Source::from_str(src);
-		let ast = parse(source.lexer()).unwrap();
-
-		match &ast.items[1] {
-			Item::Rule(r) => match &r.body[0] {
-				Statement::Let(l) => match &l.value {
-					Expr::Match(m) => {
-						assert!(m.as_type.is_some());
-						let as_expr = m.as_type.as_ref().unwrap();
-						assert_eq!(as_expr.mode, Modal::Should);
-					}
-					_ => panic!("expected match"),
-				},
-				_ => panic!("expected let"),
-			},
-			_ => panic!("expected rule"),
-		}
-	}
-
-	#[test]
-	fn parse_match_with_as_may() {
-		let src = r#"
-namespace my {}
-
-rule test {
-    let x = match query(v/value) as(my:Type, may) {
-        A => true,
-        else => false
-    }
-}
-"#;
-		let source = Wa2Source::from_str(src);
-		let ast = parse(source.lexer()).unwrap();
-
-		match &ast.items[1] {
-			Item::Rule(r) => match &r.body[0] {
-				Statement::Let(l) => match &l.value {
-					Expr::Match(m) => {
-						assert!(m.as_type.is_some());
-						let as_expr = m.as_type.as_ref().unwrap();
-						assert_eq!(as_expr.mode, Modal::May);
-					}
-					_ => panic!("expected match"),
-				},
-				_ => panic!("expected let"),
-			},
-			_ => panic!("expected rule"),
-		}
-	}
-
-	#[test]
-	fn parse_match_without_as() {
+	fn parse_match() {
 		let src = r#"
 rule test {
     let x = match query(v/value) {
@@ -2059,7 +1919,7 @@ rule test {
 			Item::Rule(r) => match &r.body[0] {
 				Statement::Let(l) => match &l.value {
 					Expr::Match(m) => {
-						assert!(m.as_type.is_none());
+						assert_eq!(m.arms.len(), 2);
 					}
 					_ => panic!("expected match"),
 				},

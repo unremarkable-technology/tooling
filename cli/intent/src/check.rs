@@ -13,7 +13,7 @@ use url::Url;
 
 use wa2lsp::iaac::cloudformation::cfn_ir::types::CfnTemplate;
 use wa2lsp::iaac::cloudformation::spec_cache::load_default_spec_store;
-use wa2lsp::intents::kernel::{AssertSeverity, Kernel};
+use wa2lsp::intents::kernel::{AnalysisResult, AssertSeverity, Kernel, PolicyOutcome};
 use wa2lsp::intents::model::{EntityId, Model, Value};
 use wa2lsp::intents::vendor::{DocumentFormat, Method, Vendor};
 
@@ -423,76 +423,42 @@ pub async fn run(
 
 	out.section("RESULTS");
 
-	let mut exit_code = if analysis.failures.is_empty() {
-		out.tree(
-			"",
-			true,
-			Status::Pass,
-			&format!("Profile: {profile}"),
-			Some("Target satisfies the selected intent profile."),
-		);
-		ExitCode::SUCCESS
-	} else {
-		out.tree("", true, Status::Fail, &format!("Profile: {profile}"), None);
-		let profile_prefix = Reporter::child_prefix("", true);
-
-		for (idx, failure) in analysis.failures.iter().enumerate() {
-			let is_last = idx + 1 == analysis.failures.len();
-
-			let mut detail_parts = Vec::new();
-
-			if let Some(subject) = failure.subject {
-				let name = analysis.model.qualified_name(subject);
-				detail_parts.push(format!("Subject: {name}"));
-			}
-
-			if let Some(location) = analysis.resolve_failure_location(failure) {
-				let display_path = location
-					.uri
-					.to_file_path()
-					.ok()
-					.and_then(|p| {
-						std::env::current_dir()
-							.ok()
-							.and_then(|cwd| p.strip_prefix(&cwd).ok().map(|rel| rel.to_path_buf()))
-							.or(Some(p))
-					})
-					.map(|p| p.display().to_string())
-					.unwrap_or_else(|| location.uri.to_string());
-
-				detail_parts.push(format!(
-					"Location: {}: line {}",
-					display_path,
-					location.range.start.line + 1,
-				));
-			}
-
-			if let Some(area_id) = failure.area {
-				let area = analysis.model.qualified_name(area_id);
-				detail_parts.push(format!("Area: {area}"));
-			}
-
-			if let Some(msg) = &failure.message {
-				detail_parts.push(format!("Message: {msg}"));
-			}
-
-			let detail = if detail_parts.is_empty() {
-				None
-			} else {
-				Some(detail_parts.join("\n"))
-			};
-
-			let label = format!("{} ({})", failure.assertion, failure.severity.label());
+	// Replace the exit_code block with:
+	let mut exit_code = match analysis.outcome {
+		PolicyOutcome::Pass => {
 			out.tree(
-				&profile_prefix,
-				is_last,
-				Status::from(failure.severity),
-				&label,
-				detail.as_deref(),
+				"",
+				true,
+				Status::Pass,
+				&format!("Profile: {profile}"),
+				Some("Target satisfies the selected intent profile."),
 			);
+			ExitCode::SUCCESS
 		}
-
-		ExitCode::FAILURE
+		PolicyOutcome::Degraded => {
+			out.tree(
+				"",
+				true,
+				Status::Warn,
+				&format!("Profile: {profile}"),
+				Some("Target satisfies the selected intent profile with warnings."),
+			);
+			let profile_prefix = Reporter::child_prefix("", true);
+			print_failures(&out, &profile_prefix, &analysis);
+			ExitCode::SUCCESS
+		}
+		PolicyOutcome::Fail => {
+			out.tree(
+				"",
+				true,
+				Status::Fail,
+				&format!("Profile: {profile}"),
+				Some("Target does not satisfy the selected intent profile."),
+			);
+			let profile_prefix = Reporter::child_prefix("", true);
+			print_failures(&out, &profile_prefix, &analysis);
+			ExitCode::FAILURE
+		}
 	};
 
 	if graph {
@@ -530,6 +496,64 @@ pub async fn run(
 	}
 
 	exit_code
+}
+
+fn print_failures(out: &Reporter, prefix: &str, analysis: &AnalysisResult) {
+	for (idx, failure) in analysis.failures.iter().enumerate() {
+		let is_last = idx + 1 == analysis.failures.len();
+
+		let mut detail_parts = Vec::new();
+
+		if let Some(subject) = failure.subject {
+			let name = analysis.model.qualified_name(subject);
+			detail_parts.push(format!("Subject: {name}"));
+		}
+
+		if let Some(location) = analysis.resolve_failure_location(failure) {
+			let display_path = location
+				.uri
+				.to_file_path()
+				.ok()
+				.and_then(|p| {
+					std::env::current_dir()
+						.ok()
+						.and_then(|cwd| p.strip_prefix(&cwd).ok().map(|rel| rel.to_path_buf()))
+						.or(Some(p))
+				})
+				.map(|p| p.display().to_string())
+				.unwrap_or_else(|| location.uri.to_string());
+
+			detail_parts.push(format!(
+				"Location: {}: line {}",
+				display_path,
+				location.range.start.line + 1,
+			));
+		}
+
+		if let Some(area_id) = failure.area {
+			let area = analysis.model.qualified_name(area_id);
+			detail_parts.push(format!("Area: {area}"));
+		}
+
+		if let Some(msg) = &failure.message {
+			detail_parts.push(format!("Message: {msg}"));
+		}
+
+		let detail = if detail_parts.is_empty() {
+			None
+		} else {
+			Some(detail_parts.join("\n"))
+		};
+
+		let label = format!("{} ({})", failure.assertion, failure.severity.label());
+		out.tree(
+			prefix,
+			is_last,
+			Status::from(failure.severity),
+			&label,
+			detail.as_deref(),
+		);
+	}
 }
 
 fn classify_graph_node(model: &Model, node: EntityId) -> GraphNodeKind {

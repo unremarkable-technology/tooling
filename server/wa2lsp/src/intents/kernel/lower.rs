@@ -60,13 +60,6 @@ impl<'m> Lower<'m> {
 		}
 	}
 
-	/// Qualify type name in AsExpr if unqualified
-	fn qualify_as_expr(&self, as_expr: &mut AsExpr) {
-		if as_expr.target_type.namespace.is_none() {
-			as_expr.target_type.namespace = Some(self.current_namespace());
-		}
-	}
-
 	/// Walk statements and qualify type names in as() expressions
 	fn qualify_statements(&self, stmts: &mut [Statement]) {
 		for stmt in stmts {
@@ -107,9 +100,6 @@ impl<'m> Lower<'m> {
 		match expr {
 			Expr::Match(match_expr) => {
 				self.qualify_expr(&mut match_expr.value);
-				if let Some(ref mut as_type) = match_expr.as_type {
-					self.qualify_as_expr(as_type);
-				}
 				for arm in &mut match_expr.arms {
 					self.qualify_expr(&mut arm.result);
 				}
@@ -282,6 +272,9 @@ impl<'m> Lower<'m> {
 			}
 
 			Item::Rule(rule) => {
+				// Validate: no add statements allowed in rules
+				Self::validate_rule_body(&rule.body, &rule.name)?;
+
 				let mut qualified_rule = rule.clone();
 				let qualified_name = self.qualify(&rule.name);
 				qualified_rule.name = qualified_name;
@@ -413,6 +406,59 @@ impl<'m> Lower<'m> {
 			}
 		}
 		Ok(())
+	}
+
+	/// Validate that rule body contains no add statements (rules only query)
+	fn validate_rule_body(stmts: &[Statement], rule_name: &str) -> Result<(), LowerError> {
+		for stmt in stmts {
+			match stmt {
+				Statement::Add(_) => {
+					return Err(LowerError {
+						message: format!(
+							"rule '{}' contains 'add' statement; rules can only query, use 'derive' to add facts",
+							rule_name
+						),
+					});
+				}
+				Statement::For(for_stmt) => {
+					Self::validate_rule_body(&for_stmt.body, rule_name)?;
+				}
+				Statement::If(if_stmt) => {
+					Self::validate_rule_body(&if_stmt.then_body, rule_name)?;
+					if let Some(ref else_body) = if_stmt.else_body {
+						Self::validate_rule_body(else_body, rule_name)?;
+					}
+				}
+				Statement::Let(let_stmt) => {
+					// Check for add expressions in let bindings
+					Self::validate_rule_expr(&let_stmt.value, rule_name)?;
+				}
+				_ => {}
+			}
+		}
+		Ok(())
+	}
+
+	/// Validate that expression contains no add expressions
+	fn validate_rule_expr(expr: &Expr, rule_name: &str) -> Result<(), LowerError> {
+		match expr {
+			Expr::Add(_) => Err(LowerError {
+				message: format!(
+					"rule '{}' contains 'add' expression; rules can only query, use 'derive' to add facts",
+					rule_name
+				),
+			}),
+			Expr::Match(match_expr) => {
+				Self::validate_rule_expr(&match_expr.value, rule_name)?;
+				for arm in &match_expr.arms {
+					Self::validate_rule_expr(&arm.result, rule_name)?;
+				}
+				Ok(())
+			}
+			Expr::Empty(inner, _) => Self::validate_rule_expr(inner, rule_name),
+			Expr::As(as_val) => Self::validate_rule_expr(&as_val.inner, rule_name),
+			_ => Ok(()),
+		}
 	}
 
 	/// Lower @#doc annotations to wa2:tldr, wa2:why, wa2:summary predicates
@@ -690,5 +736,106 @@ namespace my {
 			},
 			_ => panic!("expected Let statement"),
 		}
+	}
+
+	#[test]
+	fn reject_add_statement_in_rule() {
+		let src = r#"
+rule bad {
+    for x in query(core:Store) {
+        add(x, test:tag, "value")
+    }
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		let mut model = Model::bootstrap();
+		model.ensure_namespace("core").unwrap();
+		model.ensure_namespace("test").unwrap();
+		let mut lower = Lower::new(&mut model, "test").unwrap();
+
+		let result = lower.lower(&ast);
+		assert!(result.is_err());
+		let err = result.unwrap_err();
+		assert!(
+			err.message.contains("add"),
+			"Error should mention 'add': {}",
+			err.message
+		);
+		assert!(
+			err.message.contains("rule"),
+			"Error should mention 'rule': {}",
+			err.message
+		);
+	}
+
+	#[test]
+	fn reject_add_expression_in_rule() {
+		let src = r#"
+rule bad {
+    for x in query(core:Store) {
+        let y = add(_, test:tag, "value")
+    }
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		let mut model = Model::bootstrap();
+		model.ensure_namespace("core").unwrap();
+		model.ensure_namespace("test").unwrap();
+		let mut lower = Lower::new(&mut model, "test").unwrap();
+
+		let result = lower.lower(&ast);
+		assert!(result.is_err());
+		let err = result.unwrap_err();
+		assert!(
+			err.message.contains("add"),
+			"Error should mention 'add': {}",
+			err.message
+		);
+	}
+
+	#[test]
+	fn allow_add_in_derive() {
+		let src = r#"
+derive good {
+    for x in query(core:Store) {
+        add(x, test:tag, "value")
+    }
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		let mut model = Model::bootstrap();
+		model.ensure_namespace("core").unwrap();
+		model.ensure_namespace("test").unwrap();
+		let mut lower = Lower::new(&mut model, "test").unwrap();
+
+		let result = lower.lower(&ast);
+		assert!(result.is_ok());
+		assert_eq!(result.unwrap().derives.len(), 1);
+	}
+
+	#[test]
+	fn allow_must_in_rule() {
+		let src = r#"
+rule good {
+    must query(core:Store)
+}
+"#;
+		let source = Wa2Source::from_str(src);
+		let ast = parse(source.lexer()).unwrap();
+
+		let mut model = Model::bootstrap();
+		model.ensure_namespace("core").unwrap();
+		model.ensure_namespace("test").unwrap();
+		let mut lower = Lower::new(&mut model, "test").unwrap();
+
+		let result = lower.lower(&ast);
+		assert!(result.is_ok());
+		assert_eq!(result.unwrap().rules.len(), 1);
 	}
 }
