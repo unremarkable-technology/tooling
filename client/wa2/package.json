@@ -3,7 +3,7 @@
    "displayName": "WA2 - Well-Architected 2",
    "description": "CloudFormation validation + Well-Architected 2 best practices. Real-time architectural guidance as you build.",
    "icon": "images/logo.png",
-   "version": "0.1.18",
+   "version": "0.1.19",
    "engines": {
       "vscode": "^1.95.0"
    },
