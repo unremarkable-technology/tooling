@@ -5,7 +5,8 @@ use std::process::ExitCode;
 mod check;
 
 #[derive(Parser)]
-#[command(name = "wa2", version, about = "WA2 - Well-Architected 2")]
+#[command(version, about)]
+/// intent, part of WA2 (Well-Architected 2). https://well.architected.to/
 struct Cli {
 	#[command(subcommand)]
 	command: Commands,
